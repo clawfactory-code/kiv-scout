@@ -107,6 +107,29 @@ Benchmark the local index/status/capsule/skeleton paths:
 kiv-scout bench --repo /path/to/repo
 ```
 
+## Query Effectively
+
+Kiv Scout supports natural-language-looking queries, but ranking is lexical rather than embedding-based. It searches indexed paths, source text, and extracted symbols with SQLite FTS5 plus fallback scanning. There is no embedding model, vector database, or semantic nearest-neighbor search.
+
+Good queries use words likely to appear in code, comments, file names, docs, or symbols:
+
+```bash
+kiv-scout capsule "request routing middleware" --cap files
+kiv-scout capsule "websocket message dispatch" --cap files
+kiv-scout capsule "validate prompt graph before execution" --cap files
+```
+
+Prefer concrete domain terms over vague questions. `where is auth checked` is usually better than `how does security work`; `queue retry backoff` is better than `why are jobs slow`.
+
+If the first pass is too broad, add more exact terms from the file list or symbols:
+
+```bash
+kiv-scout capsule "PromptExecutor validate_prompt" --cap balanced
+kiv-scout capsule "CacheKeySetInputSignature cache invalidation" --cap balanced
+```
+
+Use `--cap files` first to get candidate paths cheaply, then switch to `--cap balanced` or `--cap deep` only after the file list looks plausible. For a known large file, use `skeleton` before opening full source.
+
 ## MCP Mode
 
 Kiv Scout can run as a small MCP-style JSON-lines server over stdio:
