@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use clap::Subcommand;
+use clap::Args;
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,23 +11,20 @@ use walkdir::WalkDir;
 mod capsule;
 pub(crate) use capsule::{CapsuleCap, CapsuleMode, capsule, render_skeleton};
 
-#[derive(Subcommand)]
-pub enum ScoutCommands {
-    /// Benchmark index/status/capsule/skeleton paths for a repo.
-    Bench {
-        /// Repository root to benchmark.
-        #[arg(long, default_value = ".")]
-        repo: PathBuf,
-        /// Query for capsule benchmarks.
-        #[arg(long, default_value = "where is request authentication checked")]
-        query: String,
-        /// Number of runs for low-latency commands.
-        #[arg(long, default_value_t = 7)]
-        runs: usize,
-        /// Emit JSON instead of a table.
-        #[arg(long)]
-        json: bool,
-    },
+#[derive(Args)]
+pub struct BenchArgs {
+    /// Repository root to benchmark.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Query for capsule benchmarks.
+    #[arg(long, default_value = "where is request authentication checked")]
+    query: String,
+    /// Number of runs for low-latency commands.
+    #[arg(long, default_value_t = 7)]
+    runs: usize,
+    /// Emit JSON instead of a table.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,21 +47,12 @@ struct BenchRun {
     max_ms: f64,
 }
 
-pub fn handle_scout_command(command: ScoutCommands) -> Result<()> {
-    match command {
-        ScoutCommands::Bench {
-            repo,
-            query,
-            runs,
-            json,
-        } => {
-            let report = bench(&repo, &query, runs)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print_bench_table(&report);
-            }
-        }
+pub fn bench_command(args: BenchArgs) -> Result<()> {
+    let report = bench(&args.repo, &args.query, args.runs)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_bench_table(&report);
     }
     Ok(())
 }

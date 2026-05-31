@@ -120,7 +120,7 @@ pub(crate) fn capsule(
     out.push_str(&format!("**Mode:** {}\n\n", mode.label()));
     out.push_str("## Pivot Files\n\n");
     if rows.is_empty() {
-        out.push_str("*No indexed files matched. Try `kiv index` or a broader query.*\n");
+        out.push_str("*No indexed files matched. Try `kiv-scout index` or a broader query.*\n");
         return Ok(out);
     }
     let mut used = estimate_tokens(&out);

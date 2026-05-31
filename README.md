@@ -26,10 +26,10 @@ cd kiv-scout
 cargo build --release
 ```
 
-Run from the checkout:
+Run the built binary from the checkout:
 
 ```bash
-cargo run -- index /path/to/repo
+./target/release/kiv-scout index /path/to/repo
 ```
 
 Or install locally from the checkout:
@@ -69,6 +69,12 @@ Inspect a large file before opening it fully:
 
 ```bash
 kiv-scout skeleton src/main.rs --detail minimal
+```
+
+Benchmark the local index/status/capsule/skeleton paths:
+
+```bash
+kiv-scout bench --repo /path/to/repo
 ```
 
 ## MCP Mode

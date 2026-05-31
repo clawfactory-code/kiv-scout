@@ -15,7 +15,7 @@ use walkdir::WalkDir;
 
 mod scout;
 
-use scout::{CapsuleCap, CapsuleMode, capsule, render_skeleton};
+use scout::{BenchArgs, CapsuleCap, CapsuleMode, capsule, render_skeleton};
 
 #[derive(Parser)]
 #[command(name = "kiv-scout")]
@@ -64,11 +64,8 @@ enum Commands {
         #[arg(long)]
         max_files: Option<usize>,
     },
-    /// Scout benchmark workflows.
-    Scout {
-        #[command(subcommand)]
-        command: scout::ScoutCommands,
-    },
+    /// Benchmark index/status/capsule/skeleton paths for a repo.
+    Bench(BenchArgs),
     /// Run a minimal MCP-compatible JSON-lines server over stdio.
     Mcp {
         /// Repository root. Defaults to current directory or config default_repo.
@@ -186,7 +183,7 @@ fn main() -> Result<()> {
                 capsule(&conn, &query, max_tokens, include_tests, mode, max_files)?
             );
         }
-        Commands::Scout { command } => scout::handle_scout_command(command)?,
+        Commands::Bench(args) => scout::bench_command(args)?,
         Commands::Mcp { dir } => {
             let root = repo_root(dir.or_else(|| config.default_repo.clone()))?;
             run_mcp(&root, &config)?;
