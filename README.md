@@ -32,10 +32,11 @@ Run the built binary from the checkout:
 ./target/release/kiv-scout index /path/to/repo
 ```
 
-Add to your env to havd a shorthand:
+If you want to run the checkout binary after changing directories, keep an absolute command handy:
 
 ```bash
-export kiv-scout="$PWD/target/release/kiv-scout"
+export KIV_SCOUT="$PWD/target/release/kiv-scout"
+$KIV_SCOUT index /path/to/repo
 ```
 
 Or install locally from the checkout:
@@ -256,7 +257,7 @@ Set `auto_index = true` to make `status`, `capsule`, and MCP context calls build
 
 ## Limitations
 
-- The index is local and explicit; run `kiv-scout index` after meaningful repo changes, or use auto update flag, or have watcher running to be able to fetch latest code.
+- The index is local and explicit; run `kiv-scout index` after meaningful codebase changes, use `--auto-index`, or keep `kiv-scout watcher start` running to update the index incrementally.
 - Tree-sitter extraction is currently strongest for Rust, TypeScript, JavaScript, and Python.
 - Ranking is lexical and symbol-aware, not semantic.
 - MCP output is intentionally bounded and may omit useful context until you raise caps.
