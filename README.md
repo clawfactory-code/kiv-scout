@@ -32,6 +32,13 @@ Run the built binary from the checkout:
 ./target/release/kiv-scout index /path/to/repo
 ```
 
+If you want to run the checkout binary after changing directories, keep an absolute command handy:
+
+```bash
+export KIV_SCOUT="$PWD/target/release/kiv-scout"
+$KIV_SCOUT index /path/to/repo
+```
+
 Or install locally from the checkout:
 
 ```bash
@@ -48,7 +55,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 Or keep using the checkout binary:
 
 ```bash
-./target/release/kiv-scout status /path/to/repo
+$KIV_SCOUT status /path/to/repo
 ```
 
 ## Quick Start
