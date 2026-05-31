@@ -11,8 +11,8 @@ use std::env;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::thread::sleep;
-use std::time::{Duration, Instant, SystemTime};
+use std::process::Command as ProcessCommand;
+use std::time::{Instant, SystemTime};
 use tree_sitter::{Language, Node, Parser as TsParser};
 use walkdir::{DirEntry, WalkDir};
 
@@ -88,7 +88,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum WatcherCommands {
-    /// Poll watched repositories and incrementally update their indexes.
+    /// Run the external watch command to incrementally update watched repos.
     Start {
         /// Seconds between watch passes.
         #[arg(long, default_value_t = 5)]
@@ -622,8 +622,28 @@ fn handle_watcher_command(command: WatcherCommands) -> Result<()> {
 }
 
 fn start_watcher(interval_secs: u64, once: bool) -> Result<()> {
-    let interval = Duration::from_secs(interval_secs.max(1));
-    eprintln!("{}", watcher_platform_note());
+    if once {
+        return watcher_pass();
+    }
+    ensure_watch_command()?;
+    let exe = env::current_exe().context("failed to resolve current executable")?;
+    eprintln!("{}", watcher_platform_note(interval_secs.max(1)));
+    let status = ProcessCommand::new("watch")
+        .arg("-n")
+        .arg(interval_secs.max(1).to_string())
+        .arg(exe)
+        .arg("watcher")
+        .arg("start")
+        .arg("--once")
+        .status()
+        .context("failed to start external `watch` command")?;
+    if !status.success() {
+        bail!("external `watch` command exited with status {status}");
+    }
+    Ok(())
+}
+
+fn watcher_pass() -> Result<()> {
     loop {
         let repos = read_watchlist()?;
         if repos.is_empty() {
@@ -649,24 +669,130 @@ fn start_watcher(interval_secs: u64, once: bool) -> Result<()> {
                 );
             }
         }
-        if once {
-            return Ok(());
-        }
-        sleep(interval);
+        return Ok(());
     }
 }
 
-fn watcher_platform_note() -> &'static str {
+fn watcher_platform_note(interval_secs: u64) -> String {
+    match env::consts::OS {
+        "macos" => format!(
+            "Kiv Scout watcher starting on macOS via external `watch` every {interval_secs}s."
+        ),
+        "linux" => format!(
+            "Kiv Scout watcher starting on Linux via external `watch` every {interval_secs}s."
+        ),
+        _ => format!("Kiv Scout watcher starting via external `watch` every {interval_secs}s."),
+    }
+}
+
+fn ensure_watch_command() -> Result<()> {
+    if command_exists("watch") {
+        return Ok(());
+    }
+    eprintln!("{}", watch_missing_message());
+    if !io::stdin().is_terminal() {
+        bail!("external `watch` command is required for `kiv-scout watcher start`");
+    }
+    if prompt_yes_no("Install `watch` now? [y/N] ")? {
+        install_watch_command()?;
+        if command_exists("watch") {
+            return Ok(());
+        }
+        bail!("`watch` still was not found on PATH after install attempt");
+    }
+    bail!("external `watch` command is required for `kiv-scout watcher start`")
+}
+
+fn command_exists(name: &str) -> bool {
+    env::var_os("PATH")
+        .map(|paths| {
+            env::split_paths(&paths).any(|path| {
+                let candidate = path.join(name);
+                candidate.is_file()
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn prompt_yes_no(prompt: &str) -> Result<bool> {
+    eprint!("{prompt}");
+    io::stderr().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
+}
+
+fn install_watch_command() -> Result<()> {
+    let command = watch_install_command().ok_or_else(|| {
+        anyhow::anyhow!("no supported package manager found for installing `watch`")
+    })?;
+    eprintln!("Running: {}", command.join(" "));
+    let status = ProcessCommand::new(&command[0])
+        .args(&command[1..])
+        .status()
+        .with_context(|| format!("failed to run {}", command.join(" ")))?;
+    if !status.success() {
+        bail!("install command exited with status {status}");
+    }
+    Ok(())
+}
+
+fn watch_install_command() -> Option<Vec<String>> {
+    match env::consts::OS {
+        "macos" => command_exists("brew").then(|| {
+            vec![
+                "brew".to_string(),
+                "install".to_string(),
+                "watch".to_string(),
+            ]
+        }),
+        "linux" => {
+            if command_exists("apt-get") {
+                Some(vec![
+                    "sudo".to_string(),
+                    "apt-get".to_string(),
+                    "install".to_string(),
+                    "-y".to_string(),
+                    "procps".to_string(),
+                ])
+            } else if command_exists("dnf") {
+                Some(vec![
+                    "sudo".to_string(),
+                    "dnf".to_string(),
+                    "install".to_string(),
+                    "-y".to_string(),
+                    "procps-ng".to_string(),
+                ])
+            } else if command_exists("pacman") {
+                Some(vec![
+                    "sudo".to_string(),
+                    "pacman".to_string(),
+                    "-S".to_string(),
+                    "procps-ng".to_string(),
+                ])
+            } else if command_exists("brew") {
+                Some(vec![
+                    "brew".to_string(),
+                    "install".to_string(),
+                    "watch".to_string(),
+                ])
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn watch_missing_message() -> &'static str {
     match env::consts::OS {
         "macos" => {
-            "Kiv Scout watcher starting on macOS with built-in polling; no external `watch` command is required."
+            "The external `watch` command is required but was not found. On macOS, install it with `brew install watch`."
         }
         "linux" => {
-            "Kiv Scout watcher starting on Linux with built-in polling; no external `watch` command is required."
+            "The external `watch` command is required but was not found. Install it with your package manager, for example `sudo apt-get install procps`, `sudo dnf install procps-ng`, or `sudo pacman -S procps-ng`."
         }
-        _ => {
-            "Kiv Scout watcher starting with built-in polling; no external `watch` command is required."
-        }
+        _ => "The external `watch` command is required but was not found on PATH.",
     }
 }
 

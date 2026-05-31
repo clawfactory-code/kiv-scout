@@ -133,9 +133,9 @@ kiv-scout bench --repo /path/to/repo
 kiv-scout watcher start
 ```
 
-The watcher polls watched repositories and applies the same incremental updater used by `--auto-index`: new files are added, changed files are refreshed, and removed files are deleted from the DB. It writes updates to each repo's existing `.kiv/index.db`.
+The watcher uses the external Unix `watch` command to run one incremental update pass on an interval. Each pass applies the same incremental updater used by `--auto-index`: new files are added, changed files are refreshed, and removed files are deleted from the DB. It writes updates to each repo's existing `.kiv/index.db`.
 
-On macOS and Linux, Kiv Scout uses built-in polling. It does not require the external Unix `watch` command, so macOS users do not need to install GNU `watch` with Homebrew.
+On Linux, `watch` is usually available through `procps` or `procps-ng`. On macOS, `watch` is not installed by default. If it is missing, `kiv-scout watcher start` explains the install command and, in an interactive terminal, asks before attempting to install it.
 
 Useful watcher commands:
 
