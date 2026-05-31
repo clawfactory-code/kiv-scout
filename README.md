@@ -1,6 +1,5 @@
 # Kiv Scout
 
-[![CI](https://github.com/clawfactory-code/kiv-scout/actions/workflows/ci.yml/badge.svg)](https://github.com/clawfactory-code/kiv-scout/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Kiv Scout is a local-first codebase index and MCP context server for quickly navigating large repositories.
@@ -153,18 +152,6 @@ Current retrieved chunks are conservative on purpose. If your agent has a larger
 Kiv Scout looks for `kiv-scout.toml` in the current directory, or a path passed with `--config`, or the `KIV_SCOUT_CONFIG` environment variable.
 
 The repository ships `kiv-scout.toml.example` as a blank template. Keep machine-specific paths in your local `kiv-scout.toml`; that file is ignored by git.
-
-## CI
-
-CI means continuous integration: a hosted check that runs on every push or pull request so formatting, tests, and linting fail before broken code lands.
-
-This repo includes `.github/workflows/ci.yml`, which runs:
-
-```bash
-cargo fmt --check
-cargo test --locked
-cargo clippy --locked -- -D warnings
-```
 
 ## Limitations
 
