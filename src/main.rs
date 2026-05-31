@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use tree_sitter::{Language, Node, Parser as TsParser};
 use walkdir::WalkDir;
 
@@ -26,6 +26,9 @@ struct Cli {
     /// Optional TOML config file. Defaults to ./kiv-scout.toml when present.
     #[arg(long, global = true)]
     config: Option<PathBuf>,
+    /// Automatically build or refresh the index before commands that need it.
+    #[arg(long, global = true)]
+    auto_index: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -121,6 +124,8 @@ struct Config {
     max_files: Option<usize>,
     /// Include test files in capsules by default.
     include_tests: Option<bool>,
+    /// Automatically build or refresh the index before commands that need it.
+    auto_index: Option<bool>,
     /// Max token budget accepted by the MCP get_context_capsule tool.
     mcp_max_tokens: Option<usize>,
     /// Max file count accepted by the MCP get_context_capsule tool.
@@ -130,6 +135,7 @@ struct Config {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = load_config(cli.config.as_deref())?;
+    let auto_index = cli.auto_index || config.auto_index.unwrap_or(false);
     match cli.command {
         Commands::Index { dir } => {
             let root = repo_root(dir.or_else(|| config.default_repo.clone()))?;
@@ -144,7 +150,7 @@ fn main() -> Result<()> {
         }
         Commands::Status { dir } => {
             let root = repo_root(dir.or_else(|| config.default_repo.clone()))?;
-            let conn = open_db(&root)?;
+            let conn = open_db_maybe_auto_index(&root, auto_index)?;
             let status = load_status(&conn, &root)?;
             println!("{}", serde_json::to_string_pretty(&status)?);
         }
@@ -170,7 +176,7 @@ fn main() -> Result<()> {
             max_files,
         } => {
             let root = repo_root(config.default_repo.clone())?;
-            let conn = open_db(&root)?;
+            let conn = open_db_maybe_auto_index(&root, auto_index)?;
             let cap_name = cap
                 .or_else(|| config.default_capsule.clone())
                 .unwrap_or_else(|| "default".to_string());
@@ -187,7 +193,7 @@ fn main() -> Result<()> {
         Commands::Bench(args) => scout::bench_command(args)?,
         Commands::Mcp { dir } => {
             let root = repo_root(dir.or_else(|| config.default_repo.clone()))?;
-            run_mcp(&root, &config)?;
+            run_mcp(&root, &config, auto_index)?;
         }
     }
     Ok(())
@@ -241,6 +247,53 @@ fn open_db(root: &Path) -> Result<Connection> {
         );
     }
     Connection::open(path).context("failed to open index database")
+}
+
+fn open_db_maybe_auto_index(root: &Path, auto_index: bool) -> Result<Connection> {
+    if auto_index {
+        auto_index_if_needed(root)?;
+    }
+    open_db(root)
+}
+
+fn auto_index_if_needed(root: &Path) -> Result<()> {
+    let reason = index_refresh_reason(root)?;
+    if let Some(reason) = reason {
+        if io::stderr().is_terminal() {
+            eprintln!("Auto-indexing {} ({reason})", root.display());
+        }
+        index_repo(root)?;
+    }
+    Ok(())
+}
+
+fn index_refresh_reason(root: &Path) -> Result<Option<&'static str>> {
+    let path = db_path(root);
+    if !path.exists() {
+        return Ok(Some("missing index"));
+    }
+    if source_newer_than_index(root, &path)? {
+        return Ok(Some("source newer than index"));
+    }
+    Ok(None)
+}
+
+fn source_newer_than_index(root: &Path, index_path: &Path) -> Result<bool> {
+    let index_modified = modified_time(index_path)?;
+    for source in collect_source_paths(root)? {
+        if let Ok(modified) = modified_time(&source.abs)
+            && modified > index_modified
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn modified_time(path: &Path) -> Result<SystemTime> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .with_context(|| format!("failed to read modified time for {}", path.display()))
 }
 
 fn index_repo(root: &Path) -> Result<Status> {
@@ -947,7 +1000,7 @@ struct McpRequest {
     params: Value,
 }
 
-fn run_mcp(root: &Path, config: &Config) -> Result<()> {
+fn run_mcp(root: &Path, config: &Config, auto_index: bool) -> Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     for line in stdin.lock().lines() {
@@ -956,7 +1009,7 @@ fn run_mcp(root: &Path, config: &Config) -> Result<()> {
             continue;
         }
         let response = match serde_json::from_str::<McpRequest>(&line) {
-            Ok(req) => handle_mcp_request(root, config, req),
+            Ok(req) => handle_mcp_request(root, config, auto_index, req),
             Err(err) => json!({"id": null, "error": {"message": err.to_string()}}),
         };
         writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
@@ -965,7 +1018,7 @@ fn run_mcp(root: &Path, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn handle_mcp_request(root: &Path, config: &Config, req: McpRequest) -> Value {
+fn handle_mcp_request(root: &Path, config: &Config, auto_index: bool, req: McpRequest) -> Value {
     let id = req.id.unwrap_or(Value::Null);
     let result = match req.method.as_str() {
         "tools/list" => Ok(json!({
@@ -975,7 +1028,7 @@ fn handle_mcp_request(root: &Path, config: &Config, req: McpRequest) -> Value {
                 {"name": "get_context_capsule", "description": "Rank files for a query; defaults to a bounded file list"}
             ]
         })),
-        "tools/call" => mcp_tool_call(root, config, &req.params),
+        "tools/call" => mcp_tool_call(root, config, auto_index, &req.params),
         _ => Err(anyhow::anyhow!("unknown method {}", req.method)),
     };
     match result {
@@ -984,7 +1037,7 @@ fn handle_mcp_request(root: &Path, config: &Config, req: McpRequest) -> Value {
     }
 }
 
-fn mcp_tool_call(root: &Path, config: &Config, params: &Value) -> Result<Value> {
+fn mcp_tool_call(root: &Path, config: &Config, auto_index: bool, params: &Value) -> Result<Value> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -995,7 +1048,7 @@ fn mcp_tool_call(root: &Path, config: &Config, params: &Value) -> Result<Value> 
         .unwrap_or_else(|| json!({}));
     match name {
         "index_status" => {
-            let conn = open_db(root)?;
+            let conn = open_db_maybe_auto_index(root, auto_index)?;
             Ok(json!(load_status(&conn, root)?))
         }
         "get_skeleton" => {
@@ -1041,7 +1094,7 @@ fn mcp_tool_call(root: &Path, config: &Config, params: &Value) -> Result<Value> 
                 .and_then(Value::as_u64)
                 .map(|value| value.clamp(1, mcp_max_files as u64) as usize)
                 .unwrap_or_else(|| config.max_files.unwrap_or(6).min(mcp_max_files));
-            let conn = open_db(root)?;
+            let conn = open_db_maybe_auto_index(root, auto_index)?;
             let content = capsule(&conn, query, max_tokens, include_tests, mode, max_files)?;
             Ok(json!({"content": truncate_mcp_text(content, 4000)}))
         }
@@ -1192,5 +1245,11 @@ def run():
     fn parses_blank_config() {
         let config: Config = toml::from_str("").unwrap();
         assert!(config.default_repo.is_none());
+    }
+
+    #[test]
+    fn parses_auto_index_config() {
+        let config: Config = toml::from_str("auto_index = true").unwrap();
+        assert_eq!(config.auto_index, Some(true));
     }
 }

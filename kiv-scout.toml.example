@@ -6,6 +6,7 @@
 # max_tokens = 6000
 # max_files = 12
 # include_tests = false
+# auto_index = false
 
 # MCP defaults are intentionally conservative. Raise these for larger context windows.
 # mcp_max_tokens = 900
