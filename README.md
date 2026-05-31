@@ -21,7 +21,7 @@ It indexes source files into a local SQLite database, extracts symbols and impor
 Build from source:
 
 ```bash
-git clone https://github.com/clawfactory-code/kiv-scout.git
+git clone https://github.com/elimaine/kiv-scout.git
 cd kiv-scout
 cargo build --release
 ```

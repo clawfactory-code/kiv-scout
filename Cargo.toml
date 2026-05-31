@@ -5,7 +5,7 @@ edition = "2024"
 description = "A local codebase index and MCP context server for quickly navigating large repositories."
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/clawfactory-code/kiv-scout"
+repository = "https://github.com/elimaine/kiv-scout"
 keywords = ["code-search", "mcp", "cli", "tree-sitter", "sqlite"]
 categories = ["command-line-utilities", "development-tools"]
 
