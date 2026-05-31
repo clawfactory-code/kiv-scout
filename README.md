@@ -70,6 +70,24 @@ Indexing writes a local SQLite database to `/path/to/repo/.kiv/index.db`. In an 
 
 Kiv Scout skips common generated, package, and environment paths by default, including `.git`, `.kiv`, `node_modules`, `target`, build output directories, Python virtualenvs such as `.venv` and `venv`, `site-packages`, package lockfiles, source maps, and minified bundles.
 
+To index all discovered user code repositories:
+
+```bash
+kiv-scout index all
+```
+
+`index all` scans common code roots under your home directory, such as `~/code`, `~/src`, `~/dev`, `~/projects`, `~/repos`, `~/work`, and `~/Developer`. It discovers git repositories while skipping package, build, cache, and virtualenv folders. To choose exact scan roots, set `KIV_SCOUT_INDEX_ROOTS` to a path-separated list.
+
+To remove generated Kiv Scout database files:
+
+```bash
+kiv-scout index remove /path/to/repo
+kiv-scout index remove
+kiv-scout index remove all
+```
+
+`index remove` removes `.kiv/index.db`, `.kiv/index.db-wal`, and `.kiv/index.db-shm` for one repo. `index remove all` removes those files from watched and discovered repos.
+
 If you want query commands to build or update the index automatically, add `--auto-index`. A missing index is built once; an existing index is updated incrementally by adding new files, refreshing changed files, and removing deleted files.
 
 ```bash

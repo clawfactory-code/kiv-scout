@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime};
 use tree_sitter::{Language, Node, Parser as TsParser};
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
 mod scout;
 
@@ -37,10 +37,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Index a repository into .kiv/index.db.
+    /// Index repositories or remove generated Kiv Scout index files.
     Index {
-        /// Repository root. Defaults to current directory or config default_repo.
-        dir: Option<PathBuf>,
+        /// Repository root, `all`, `remove`, or `remove all`.
+        #[arg(value_name = "TARGET", num_args = 0..)]
+        args: Vec<String>,
     },
     /// Print index status.
     Status {
@@ -169,18 +170,7 @@ fn main() -> Result<()> {
     let config = load_config(cli.config.as_deref())?;
     let auto_index = cli.auto_index || config.auto_index.unwrap_or(false);
     match cli.command {
-        Commands::Index { dir } => {
-            let root = repo_root(dir.or_else(|| config.default_repo.clone()))?;
-            let status = index_repo(&root)?;
-            add_watch_repo(&root)?;
-            println!(
-                "Indexed {} files, {} symbols, {} imports into {}",
-                status.files,
-                status.symbols,
-                status.imports,
-                db_path(&root).display()
-            );
-        }
+        Commands::Index { args } => handle_index_command(args, &config)?,
         Commands::Status { dir } => {
             let root = repo_root(dir.or_else(|| config.default_repo.clone()))?;
             let conn = open_db_maybe_auto_index(&root, auto_index)?;
@@ -252,6 +242,93 @@ fn load_config(path: Option<&Path>) -> Result<Config> {
     toml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
 }
 
+fn handle_index_command(args: Vec<String>, config: &Config) -> Result<()> {
+    match args.as_slice() {
+        [] => {
+            let root = repo_root(config.default_repo.clone())?;
+            index_one_repo(&root)
+        }
+        [target] if target == "all" => index_all_repos(),
+        [target] if target == "remove" => {
+            let root = repo_root(config.default_repo.clone())?;
+            remove_index_for_repo(&root)
+        }
+        [command, target] if command == "remove" && target == "all" => remove_all_indexes(),
+        [command, target] if command == "remove" => {
+            let root = repo_root(Some(PathBuf::from(target)))?;
+            remove_index_for_repo(&root)
+        }
+        [target] => {
+            let root = repo_root(Some(PathBuf::from(target)))?;
+            index_one_repo(&root)
+        }
+        _ => bail!(
+            "unsupported index arguments. Use `kiv-scout index [repo]`, `kiv-scout index all`, `kiv-scout index remove [repo]`, or `kiv-scout index remove all`"
+        ),
+    }
+}
+
+fn index_one_repo(root: &Path) -> Result<()> {
+    let status = index_repo(root)?;
+    add_watch_repo(root)?;
+    println!(
+        "Indexed {} files, {} symbols, {} imports into {}",
+        status.files,
+        status.symbols,
+        status.imports,
+        db_path(root).display()
+    );
+    Ok(())
+}
+
+fn index_all_repos() -> Result<()> {
+    let repos = discover_user_repos()?;
+    if repos.is_empty() {
+        bail!(
+            "no repositories found under common code roots. Set KIV_SCOUT_INDEX_ROOTS to a path-separated list of roots to scan."
+        );
+    }
+    println!("Discovered {} repositories", repos.len());
+    for repo in repos {
+        index_one_repo(&repo)?;
+    }
+    Ok(())
+}
+
+fn remove_index_for_repo(root: &Path) -> Result<()> {
+    let removed = remove_index_files(root)?;
+    remove_watch_repo(root)?;
+    println!(
+        "Removed {} Kiv Scout index files from {}",
+        removed,
+        root.display()
+    );
+    Ok(())
+}
+
+fn remove_all_indexes() -> Result<()> {
+    let mut repos = read_watchlist()?;
+    repos.extend(discover_user_repos()?);
+    repos.sort();
+    repos.dedup();
+    if repos.is_empty() {
+        bail!(
+            "no repositories found in the watchlist or common code roots. Set KIV_SCOUT_INDEX_ROOTS to a path-separated list of roots to scan."
+        );
+    }
+    let mut total = 0;
+    for repo in &repos {
+        total += remove_index_files(repo)?;
+        let _ = remove_watch_repo(repo);
+    }
+    println!(
+        "Removed {} Kiv Scout index files from {} repositories",
+        total,
+        repos.len()
+    );
+    Ok(())
+}
+
 fn repo_root(dir: Option<PathBuf>) -> Result<PathBuf> {
     let start = dir.unwrap_or(std::env::current_dir()?);
     let start = fs::canonicalize(&start)
@@ -268,8 +345,112 @@ fn repo_root(dir: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+fn discover_user_repos() -> Result<Vec<PathBuf>> {
+    let roots = index_scan_roots()?;
+    let mut repos = BTreeSet::new();
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| should_descend_for_repo_discovery(entry))
+            .flatten()
+        {
+            if entry.file_type().is_dir() && entry.path().join(".git").exists() {
+                if let Ok(path) = fs::canonicalize(entry.path()) {
+                    repos.insert(path);
+                }
+            }
+        }
+    }
+    Ok(repos.into_iter().collect())
+}
+
+fn index_scan_roots() -> Result<Vec<PathBuf>> {
+    if let Some(roots) = env::var_os("KIV_SCOUT_INDEX_ROOTS") {
+        return Ok(env::split_paths(&roots).collect());
+    }
+    let home = env::var_os("HOME").context("HOME is not set; set KIV_SCOUT_INDEX_ROOTS")?;
+    let home = PathBuf::from(home);
+    Ok([
+        "code",
+        "src",
+        "dev",
+        "projects",
+        "repos",
+        "work",
+        "Developer",
+    ]
+    .iter()
+    .map(|name| home.join(name))
+    .filter(|path| path.exists())
+    .collect())
+}
+
+fn should_descend_for_repo_discovery(entry: &DirEntry) -> bool {
+    let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+    if entry.depth() == 0 {
+        return true;
+    }
+    !matches!(
+        name.as_str(),
+        ".git"
+            | ".kiv"
+            | ".research"
+            | "node_modules"
+            | "target"
+            | "dist"
+            | "build"
+            | "snapshots"
+            | ".next"
+            | ".venv"
+            | "venv"
+            | "env"
+            | ".env"
+            | "site-packages"
+            | "__pypackages__"
+            | "__pycache__"
+            | ".pytest_cache"
+            | ".mypy_cache"
+            | ".ruff_cache"
+            | ".tox"
+            | ".nox"
+            | "htmlcov"
+            | "coverage"
+            | ".parcel-cache"
+            | ".turbo"
+            | "library"
+            | "applications"
+            | "downloads"
+    ) && !name.starts_with(".venv-")
+        && !name.starts_with(".venv_")
+        && !name.starts_with("venv-")
+        && !name.starts_with("venv_")
+}
+
 fn db_path(root: &Path) -> PathBuf {
     root.join(".kiv").join("index.db")
+}
+
+fn remove_index_files(root: &Path) -> Result<usize> {
+    let kiv_dir = root.join(".kiv");
+    let names = ["index.db", "index.db-wal", "index.db-shm"];
+    let mut removed = 0;
+    for name in names {
+        let path = kiv_dir.join(name);
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+            removed += 1;
+        }
+    }
+    if kiv_dir.exists() && fs::read_dir(&kiv_dir)?.next().is_none() {
+        fs::remove_dir(&kiv_dir)
+            .with_context(|| format!("failed to remove {}", kiv_dir.display()))?;
+    }
+    Ok(removed)
 }
 
 fn open_db(root: &Path) -> Result<Connection> {
