@@ -23,29 +23,32 @@ Build from source:
 ```bash
 git clone https://github.com/elimaine/kiv-scout.git
 cd kiv-scout
+./install.sh
+```
+
+The installer builds the release binary and installs `kiv-scout` into a user bin directory, preferring one already on your `PATH`. If it needs to use a directory that is not on `PATH`, it can add the PATH line to your shell startup file or print the exact command to run.
+
+Then run:
+
+```bash
+kiv-scout index /path/to/repo
+```
+
+You can also build and run the checkout binary directly:
+
+```bash
 cargo build --release
-```
-
-Run the built binary from the checkout:
-
-```bash
-./target/release/kiv-scout index /path/to/repo
-```
-
-If you want to run the checkout binary after changing directories, keep an absolute command handy:
-
-```bash
 export KIV_SCOUT="$PWD/target/release/kiv-scout"
 $KIV_SCOUT index /path/to/repo
 ```
 
-Or install locally from the checkout:
+Manual Cargo install also works:
 
 ```bash
 cargo install --path . --locked
 ```
 
-If `kiv-scout` is not found after install, Cargo's bin directory is not on your shell `PATH`.
+If `kiv-scout` is not found after Cargo install, Cargo's bin directory is not on your shell `PATH`.
 Either add it:
 
 ```bash
