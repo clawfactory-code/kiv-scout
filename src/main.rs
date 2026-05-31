@@ -7,10 +7,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime};
+use std::thread::sleep;
+use std::time::{Duration, Instant, SystemTime};
 use tree_sitter::{Language, Node, Parser as TsParser};
 use walkdir::WalkDir;
 
@@ -76,6 +78,36 @@ enum Commands {
         /// Repository root. Defaults to current directory or config default_repo.
         dir: Option<PathBuf>,
     },
+    /// Manage the background-friendly incremental index watcher.
+    Watcher {
+        #[command(subcommand)]
+        command: WatcherCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum WatcherCommands {
+    /// Poll watched repositories and incrementally update their indexes.
+    Start {
+        /// Seconds between watch passes.
+        #[arg(long, default_value_t = 5)]
+        interval_secs: u64,
+        /// Run one pass and exit. Useful for cron, launchd, tests, or manual checks.
+        #[arg(long)]
+        once: bool,
+    },
+    /// Print watched repositories.
+    List,
+    /// Add a repository to the watcher list without indexing it.
+    Add {
+        /// Repository root.
+        dir: PathBuf,
+    },
+    /// Remove a repository from the watcher list.
+    Remove {
+        /// Repository root.
+        dir: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +172,7 @@ fn main() -> Result<()> {
         Commands::Index { dir } => {
             let root = repo_root(dir.or_else(|| config.default_repo.clone()))?;
             let status = index_repo(&root)?;
+            add_watch_repo(&root)?;
             println!(
                 "Indexed {} files, {} symbols, {} imports into {}",
                 status.files,
@@ -195,6 +228,7 @@ fn main() -> Result<()> {
             let root = repo_root(dir.or_else(|| config.default_repo.clone()))?;
             run_mcp(&root, &config, auto_index)?;
         }
+        Commands::Watcher { command } => handle_watcher_command(command)?,
     }
     Ok(())
 }
@@ -285,11 +319,12 @@ struct IncrementalIndexResult {
     upserted: usize,
     deleted: usize,
     touched_unchanged: usize,
+    rebuilt: bool,
 }
 
 impl IncrementalIndexResult {
     fn changed(&self) -> bool {
-        self.upserted > 0 || self.deleted > 0
+        self.rebuilt || self.upserted > 0 || self.deleted > 0
     }
 
     fn observed_newer_sources(&self) -> bool {
@@ -351,6 +386,7 @@ fn update_index_incremental(
         upserted: upserts.len(),
         deleted: deleted.len(),
         touched_unchanged,
+        rebuilt: false,
     };
     if result.observed_newer_sources() {
         write_index_delta(conn, root, &upserts, &deleted)?;
@@ -375,6 +411,148 @@ fn modified_time(path: &Path) -> Result<SystemTime> {
     fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .with_context(|| format!("failed to read modified time for {}", path.display()))
+}
+
+fn handle_watcher_command(command: WatcherCommands) -> Result<()> {
+    match command {
+        WatcherCommands::Start {
+            interval_secs,
+            once,
+        } => start_watcher(interval_secs, once),
+        WatcherCommands::List => {
+            for repo in read_watchlist()? {
+                println!("{}", repo.display());
+            }
+            Ok(())
+        }
+        WatcherCommands::Add { dir } => {
+            let root = repo_root(Some(dir))?;
+            add_watch_repo(&root)?;
+            println!("Watching {}", root.display());
+            Ok(())
+        }
+        WatcherCommands::Remove { dir } => {
+            let root = repo_root(Some(dir))?;
+            remove_watch_repo(&root)?;
+            println!("Removed {}", root.display());
+            Ok(())
+        }
+    }
+}
+
+fn start_watcher(interval_secs: u64, once: bool) -> Result<()> {
+    let interval = Duration::from_secs(interval_secs.max(1));
+    loop {
+        let repos = read_watchlist()?;
+        if repos.is_empty() {
+            eprintln!(
+                "No repositories are in the Kiv Scout watchlist. Run `kiv-scout index /path/to/repo` first."
+            );
+            return Ok(());
+        }
+        for repo in repos {
+            if !repo.exists() {
+                eprintln!("Skipping missing watched repo {}", repo.display());
+                continue;
+            }
+            let result = watcher_update_repo(&repo)?;
+            if result.rebuilt {
+                eprintln!("Rebuilt {}", repo.display());
+            } else if result.changed() {
+                eprintln!(
+                    "Updated {} ({} changed/new, {} removed)",
+                    repo.display(),
+                    result.upserted,
+                    result.deleted
+                );
+            }
+        }
+        if once {
+            return Ok(());
+        }
+        sleep(interval);
+    }
+}
+
+fn watcher_update_repo(root: &Path) -> Result<IncrementalIndexResult> {
+    let path = db_path(root);
+    if !path.exists() {
+        index_repo(root)?;
+        return Ok(IncrementalIndexResult {
+            rebuilt: true,
+            ..IncrementalIndexResult::default()
+        });
+    }
+    let mut conn = Connection::open(&path).context("failed to open index database")?;
+    init_schema(&conn)?;
+    update_index_incremental(&mut conn, root, &path)
+}
+
+fn add_watch_repo(root: &Path) -> Result<()> {
+    let root = fs::canonicalize(root)
+        .with_context(|| format!("failed to canonicalize {}", root.display()))?;
+    let mut repos = read_watchlist()?;
+    if !repos.iter().any(|repo| repo == &root) {
+        repos.push(root);
+        write_watchlist(&repos)?;
+    }
+    Ok(())
+}
+
+fn remove_watch_repo(root: &Path) -> Result<()> {
+    let root = fs::canonicalize(root)
+        .with_context(|| format!("failed to canonicalize {}", root.display()))?;
+    let mut repos = read_watchlist()?;
+    repos.retain(|repo| repo != &root);
+    write_watchlist(&repos)
+}
+
+fn read_watchlist() -> Result<Vec<PathBuf>> {
+    let path = watchlist_path()?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut repos = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    repos.sort();
+    repos.dedup();
+    Ok(repos)
+}
+
+fn write_watchlist(repos: &[PathBuf]) -> Result<()> {
+    let path = watchlist_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut repos = repos.to_vec();
+    repos.sort();
+    repos.dedup();
+    let text = repos
+        .iter()
+        .map(|repo| repo.display().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&path, format!("{text}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn watchlist_path() -> Result<PathBuf> {
+    if let Some(home) = env::var_os("KIV_SCOUT_HOME") {
+        return Ok(PathBuf::from(home).join("watchlist"));
+    }
+    if let Some(state_home) = env::var_os("XDG_STATE_HOME") {
+        return Ok(PathBuf::from(state_home)
+            .join("kiv-scout")
+            .join("watchlist"));
+    }
+    let home = env::var_os("HOME").context("HOME is not set; set KIV_SCOUT_HOME")?;
+    Ok(PathBuf::from(home).join(".kiv-scout").join("watchlist"))
 }
 
 fn index_repo(root: &Path) -> Result<Status> {

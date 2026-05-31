@@ -107,6 +107,27 @@ Benchmark the local index/status/capsule/skeleton paths:
 kiv-scout bench --repo /path/to/repo
 ```
 
+## Watcher
+
+`kiv-scout index /path/to/repo` registers that repository in Kiv Scout's local watchlist. To keep watched repositories updated, start the foreground watcher:
+
+```bash
+kiv-scout watcher start
+```
+
+The watcher polls watched repositories and applies the same incremental updater used by `--auto-index`: new files are added, changed files are refreshed, and removed files are deleted from the DB. It writes updates to each repo's existing `.kiv/index.db`.
+
+Useful watcher commands:
+
+```bash
+kiv-scout watcher list
+kiv-scout watcher add /path/to/repo
+kiv-scout watcher remove /path/to/repo
+kiv-scout watcher start --interval-secs 10
+```
+
+The watchlist is stored under `$KIV_SCOUT_HOME/watchlist`, `$XDG_STATE_HOME/kiv-scout/watchlist`, or `~/.kiv-scout/watchlist`.
+
 ## Query Effectively
 
 Kiv Scout supports natural-language-looking queries, but ranking is lexical rather than embedding-based. It searches indexed paths, source text, and extracted symbols with SQLite FTS5 plus fallback scanning. There is no embedding model, vector database, or semantic nearest-neighbor search.
