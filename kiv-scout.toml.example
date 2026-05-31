@@ -1,0 +1,12 @@
+# Copy this file to kiv-scout.toml and fill in local defaults as needed.
+# Leave values commented out to use CLI defaults.
+
+# default_repo = "/path/to/repo"
+# default_capsule = "files"
+# max_tokens = 6000
+# max_files = 12
+# include_tests = false
+
+# MCP defaults are intentionally conservative. Raise these for larger context windows.
+# mcp_max_tokens = 900
+# mcp_max_files = 10
