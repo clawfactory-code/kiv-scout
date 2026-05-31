@@ -35,7 +35,20 @@ Run the built binary from the checkout:
 Or install locally from the checkout:
 
 ```bash
-cargo install --path .
+cargo install --path . --locked
+```
+
+If `kiv-scout` is not found after install, Cargo's bin directory is not on your shell `PATH`.
+Either add it:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+Or keep using the checkout binary:
+
+```bash
+./target/release/kiv-scout status /path/to/repo
 ```
 
 ## Quick Start
@@ -45,6 +58,10 @@ Index a repository:
 ```bash
 kiv-scout index /path/to/repo
 ```
+
+Indexing writes a local SQLite database to `/path/to/repo/.kiv/index.db`. In an interactive terminal, the index command prints progress phases and a file-count progress bar to stderr.
+
+Kiv Scout skips common generated, package, and environment paths by default, including `.git`, `.kiv`, `node_modules`, `target`, build output directories, Python virtualenvs such as `.venv` and `venv`, `site-packages`, package lockfiles, source maps, and minified bundles.
 
 Check index status:
 

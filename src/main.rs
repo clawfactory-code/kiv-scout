@@ -8,8 +8,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tree_sitter::{Language, Node, Parser as TsParser};
 use walkdir::WalkDir;
 
@@ -20,6 +21,7 @@ use scout::{BenchArgs, CapsuleCap, CapsuleMode, capsule, render_skeleton};
 #[derive(Parser)]
 #[command(name = "kiv-scout")]
 #[command(about = "Local codebase index, skeleton, capsule, and MCP context server")]
+#[command(version)]
 struct Cli {
     /// Optional TOML config file. Defaults to ./kiv-scout.toml when present.
     #[arg(long, global = true)]
@@ -74,11 +76,10 @@ enum Commands {
 }
 
 #[derive(Debug, Clone)]
-struct SourceFile {
+struct SourcePath {
     path: String,
-    hash: String,
     lang: String,
-    text: String,
+    abs: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -243,25 +244,40 @@ fn open_db(root: &Path) -> Result<Connection> {
 }
 
 fn index_repo(root: &Path) -> Result<Status> {
+    let mut progress = IndexProgress::new(root);
     fs::create_dir_all(root.join(".kiv"))?;
-    let conn = Connection::open(db_path(root))?;
+    let mut conn = Connection::open(db_path(root))?;
     init_schema(&conn)?;
-    let files = collect_source_files(root)?;
+    progress.phase("Discovering source files");
+    let files = collect_source_paths(root)?;
+    progress.set_total(files.len());
     let mut indexed = Vec::with_capacity(files.len());
     for file in files {
-        let symbols = extract_symbols(&file.lang, &file.text);
-        let imports = extract_imports(&file.lang, &file.text);
+        let text = match fs::read_to_string(&file.abs) {
+            Ok(text) => text,
+            Err(_) => {
+                progress.tick();
+                continue;
+            }
+        };
+        let hash = hash_text(&text);
+        let symbols = extract_symbols(&file.lang, &text);
+        let imports = extract_imports(&file.lang, &text);
         indexed.push(IndexedFile {
             path: file.path,
             lang: file.lang,
-            hash: file.hash,
-            text: file.text,
+            hash,
+            text,
             symbols,
             imports,
         });
+        progress.tick();
     }
-    write_index(&conn, root, &indexed)?;
-    load_status(&conn, root)
+    progress.phase("Writing index database");
+    write_index(&mut conn, root, &indexed)?;
+    let status = load_status(&conn, root)?;
+    progress.finish(&status);
+    Ok(status)
 }
 
 fn init_schema(conn: &Connection) -> Result<()> {
@@ -298,7 +314,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn write_index(conn: &Connection, root: &Path, files: &[IndexedFile]) -> Result<()> {
+fn write_index(conn: &mut Connection, root: &Path, files: &[IndexedFile]) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute("DELETE FROM metadata", [])?;
     tx.execute("DELETE FROM files", [])?;
@@ -344,7 +360,7 @@ fn write_index(conn: &Connection, root: &Path, files: &[IndexedFile]) -> Result<
     Ok(())
 }
 
-fn collect_source_files(root: &Path) -> Result<Vec<SourceFile>> {
+fn collect_source_paths(root: &Path) -> Result<Vec<SourcePath>> {
     let mut files = Vec::new();
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = entry?;
@@ -360,20 +376,105 @@ fn collect_source_files(root: &Path) -> Result<Vec<SourceFile>> {
         if lang == "unknown" {
             continue;
         }
-        let text = match fs::read_to_string(&abs) {
-            Ok(text) => text,
-            Err(_) => continue,
-        };
-        let hash = hash_text(&text);
-        files.push(SourceFile {
+        files.push(SourcePath {
             path: rel,
-            hash,
             lang,
-            text,
+            abs,
         });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
+}
+
+struct IndexProgress {
+    enabled: bool,
+    total: usize,
+    current: usize,
+    started: Instant,
+    last_draw: Instant,
+}
+
+impl IndexProgress {
+    fn new(root: &Path) -> Self {
+        let enabled = io::stderr().is_terminal();
+        let now = Instant::now();
+        if enabled {
+            eprintln!("Indexing {}", root.display());
+        }
+        Self {
+            enabled,
+            total: 0,
+            current: 0,
+            started: now,
+            last_draw: now,
+        }
+    }
+
+    fn phase(&mut self, label: &str) {
+        if self.enabled {
+            eprintln!("{label}...");
+        }
+    }
+
+    fn set_total(&mut self, total: usize) {
+        self.total = total;
+        self.current = 0;
+        self.last_draw = Instant::now();
+        if self.enabled {
+            self.draw(true);
+        }
+    }
+
+    fn tick(&mut self) {
+        self.current += 1;
+        if !self.enabled {
+            return;
+        }
+        let now = Instant::now();
+        if self.current == self.total || now.duration_since(self.last_draw).as_millis() >= 120 {
+            self.last_draw = now;
+            self.draw(false);
+        }
+    }
+
+    fn finish(&mut self, status: &Status) {
+        if !self.enabled {
+            return;
+        }
+        eprintln!(
+            "Indexed {} files, {} symbols, {} imports in {:.1}s",
+            status.files,
+            status.symbols,
+            status.imports,
+            self.started.elapsed().as_secs_f64()
+        );
+    }
+
+    fn draw(&self, force_newline: bool) {
+        let width = 28;
+        let filled = if self.total == 0 {
+            0
+        } else {
+            self.current * width / self.total
+        };
+        let empty = width - filled;
+        let percent = if self.total == 0 {
+            0
+        } else {
+            self.current * 100 / self.total
+        };
+        eprint!(
+            "\r[{done}{rest}] {current}/{total} files ({percent}%)",
+            done = "#".repeat(filled),
+            rest = ".".repeat(empty),
+            current = self.current,
+            total = self.total,
+        );
+        let _ = io::stderr().flush();
+        if force_newline || self.current == self.total {
+            eprintln!();
+        }
+    }
 }
 
 fn relative_path(root: &Path, abs: &Path) -> Result<String> {
@@ -383,11 +484,13 @@ fn relative_path(root: &Path, abs: &Path) -> Result<String> {
     Ok(rel.to_string_lossy().replace('\\', "/"))
 }
 
-fn should_skip(rel: &str) -> bool {
+pub(crate) fn should_skip(rel: &str) -> bool {
+    let lower_rel = rel.to_ascii_lowercase();
     let parts: Vec<&str> = rel.split('/').collect();
     parts.iter().any(|part| {
+        let lower = part.to_ascii_lowercase();
         matches!(
-            *part,
+            lower.as_str(),
             ".git"
                 | ".kiv"
                 | ".research"
@@ -398,17 +501,45 @@ fn should_skip(rel: &str) -> bool {
                 | "snapshots"
                 | ".next"
                 | ".venv"
+                | "venv"
+                | "env"
+                | ".env"
+                | "site-packages"
+                | "__pypackages__"
                 | "__pycache__"
+                | ".pytest_cache"
+                | ".mypy_cache"
+                | ".ruff_cache"
+                | ".tox"
+                | ".nox"
+                | "htmlcov"
+                | "coverage"
+                | ".parcel-cache"
+                | ".turbo"
         )
+    }) || parts.iter().any(|part| {
+        let lower = part.to_ascii_lowercase();
+        lower.starts_with(".venv-")
+            || lower.starts_with(".venv_")
+            || lower.starts_with("venv-")
+            || lower.starts_with("venv_")
     }) || parts.first() == Some(&"personal")
-        || rel.ends_with(".lock")
-        || rel.ends_with(".png")
-        || rel.ends_with(".jpg")
-        || rel.ends_with(".jpeg")
-        || rel.ends_with(".gif")
-        || rel.ends_with(".pdf")
-        || rel.ends_with(".sqlite")
-        || rel.ends_with(".db")
+        || lower_rel.ends_with(".lock")
+        || lower_rel.ends_with("-lock.json")
+        || lower_rel.ends_with("pnpm-lock.yaml")
+        || lower_rel.ends_with("bun.lockb")
+        || lower_rel.ends_with(".min.js")
+        || lower_rel.ends_with(".min.css")
+        || lower_rel.ends_with(".map")
+        || lower_rel.ends_with(".png")
+        || lower_rel.ends_with(".jpg")
+        || lower_rel.ends_with(".jpeg")
+        || lower_rel.ends_with(".gif")
+        || lower_rel.ends_with(".webp")
+        || lower_rel.ends_with(".svg")
+        || lower_rel.ends_with(".pdf")
+        || lower_rel.ends_with(".sqlite")
+        || lower_rel.ends_with(".db")
 }
 
 fn language_for(path: &str) -> String {
@@ -641,6 +772,11 @@ fn extract_symbols_regex(lang: &str, text: &str) -> Vec<Symbol> {
 }
 
 pub(crate) fn extract_imports(lang: &str, text: &str) -> Vec<String> {
+    if lang == "python"
+        && let Some(imports) = extract_imports_tree_sitter(lang, text)
+    {
+        return imports;
+    }
     let mut imports = extract_imports_regex(lang, text);
     if let Some(ast_imports) = extract_imports_tree_sitter(lang, text) {
         imports.extend(ast_imports);
@@ -653,11 +789,11 @@ pub(crate) fn extract_imports(lang: &str, text: &str) -> Vec<String> {
 fn extract_imports_tree_sitter(lang: &str, text: &str) -> Option<Vec<String>> {
     let tree = parse_tree(lang, text)?;
     let mut imports = BTreeSet::new();
-    collect_import_nodes(tree.root_node(), text, &mut imports);
+    collect_import_nodes(lang, tree.root_node(), text, &mut imports);
     Some(imports.into_iter().collect())
 }
 
-fn collect_import_nodes(node: Node<'_>, text: &str, imports: &mut BTreeSet<String>) {
+fn collect_import_nodes(lang: &str, node: Node<'_>, text: &str, imports: &mut BTreeSet<String>) {
     match node.kind() {
         "use_declaration" => {
             let target = node_text(node, text)
@@ -676,14 +812,23 @@ fn collect_import_nodes(node: Node<'_>, text: &str, imports: &mut BTreeSet<Strin
             }
         }
         "import_statement" => {
-            if let Some(source) = node.child_by_field_name("source") {
+            if lang == "python" {
+                collect_python_import_targets(node_text(node, text), imports);
+            } else if let Some(source) = node.child_by_field_name("source") {
                 imports.insert(strip_quotes(node_text(source, text)).to_string());
             } else {
                 imports.insert(node_text(node, text).trim().to_string());
             }
         }
         "import_from_statement" => {
-            imports.insert(node_text(node, text).trim().to_string());
+            let import_text = node_text(node, text);
+            if import_text.trim_start().starts_with("from ") {
+                if let Some(target) = python_from_import_target(import_text) {
+                    imports.insert(target);
+                }
+            } else {
+                imports.insert(import_text.trim().to_string());
+            }
         }
         "call_expression" => {
             if is_require_call(node, text)
@@ -697,7 +842,7 @@ fn collect_import_nodes(node: Node<'_>, text: &str, imports: &mut BTreeSet<Strin
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_import_nodes(child, text, imports);
+        collect_import_nodes(lang, child, text, imports);
     }
 }
 
@@ -718,6 +863,24 @@ fn first_string_argument(node: Node<'_>, text: &str) -> Option<String> {
     None
 }
 
+fn collect_python_import_targets(import_text: &str, imports: &mut BTreeSet<String>) {
+    let Some(rest) = import_text.trim().strip_prefix("import ") else {
+        return;
+    };
+    for target in rest.split(',') {
+        let target = target.trim().split(" as ").next().unwrap_or("").trim();
+        if !target.is_empty() {
+            imports.insert(target.to_string());
+        }
+    }
+}
+
+fn python_from_import_target(import_text: &str) -> Option<String> {
+    let rest = import_text.trim().strip_prefix("from ")?;
+    let target = rest.split(" import ").next()?.trim();
+    (!target.is_empty()).then(|| target.to_string())
+}
+
 fn strip_quotes(input: &str) -> &str {
     input.trim().trim_matches('"').trim_matches('\'')
 }
@@ -731,7 +894,7 @@ fn extract_imports_regex(lang: &str, text: &str) -> Vec<String> {
             r#"require\(['"]([^'"]+)['"]\)"#,
         ],
         "python" => vec![
-            r"^\s*import\s+([A-Za-z0-9_.,\s]+)",
+            r"^\s*import\s+([A-Za-z0-9_., \t]+)",
             r"^\s*from\s+([A-Za-z0-9_.]+)\s+import",
         ],
         "go" => vec![r#"^\s*"([^"]+)""#],
@@ -991,10 +1154,41 @@ mod tests {
     fn skips_generated_dirs() {
         assert!(should_skip("target/debug/app"));
         assert!(should_skip("node_modules/pkg/index.js"));
+        assert!(should_skip("venv/lib/python3.12/site-packages/pkg/mod.py"));
+        assert!(should_skip(
+            ".venv-local/lib/python3.11/site-packages/pkg/mod.py"
+        ));
+        assert!(should_skip("src/generated/bundle.min.js"));
+        assert!(should_skip("package-lock.json"));
+        assert!(should_skip("pnpm-lock.yaml"));
+        assert!(should_skip("bun.lockb"));
         assert!(should_skip(".research/kiv-finetune/LATEST.md"));
-        assert!(should_skip("personal/wayward-kiv-install.md"));
+        assert!(should_skip("personal/local-note.md"));
         assert!(!should_skip("src/main.rs"));
         assert!(!should_skip("README.md"));
+    }
+
+    #[test]
+    fn extracts_python_imports_without_multiline_bleed() {
+        let text = r#"
+import copy
+import heapq, inspect as inspect_mod
+from enum import Enum
+from package.submodule import (
+    A,
+    B,
+)
+
+def run():
+    pass
+"#;
+        let imports = extract_imports("python", text);
+        assert!(imports.contains(&"copy".to_string()));
+        assert!(imports.contains(&"heapq".to_string()));
+        assert!(imports.contains(&"inspect".to_string()));
+        assert!(imports.contains(&"enum".to_string()));
+        assert!(imports.contains(&"package.submodule".to_string()));
+        assert!(!imports.iter().any(|import| import.contains('\n')));
     }
 
     #[test]

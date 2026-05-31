@@ -174,7 +174,8 @@ fn largest_supported_file(repo: &Path) -> Option<PathBuf> {
             continue;
         }
         let path = entry.path();
-        if should_skip_path(path) || !is_supported_source(path) {
+        let rel = display_rel(repo, path);
+        if crate::should_skip(&rel) || !is_supported_source(path) {
             continue;
         }
         let size = entry.metadata().ok()?.len();
@@ -187,15 +188,6 @@ fn largest_supported_file(repo: &Path) -> Option<PathBuf> {
         }
     }
     best.map(|(_, path)| path)
-}
-
-fn should_skip_path(path: &Path) -> bool {
-    path.components().any(|part| {
-        matches!(
-            part.as_os_str().to_str(),
-            Some(".git" | ".kiv" | "node_modules" | "target" | "snapshots")
-        )
-    })
 }
 
 fn is_supported_source(path: &Path) -> bool {

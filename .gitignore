@@ -2,3 +2,11 @@
 /.kiv
 /personal
 kiv-scout.toml
+.venv
+venv
+env
+.env
+node_modules
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
