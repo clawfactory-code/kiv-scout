@@ -76,7 +76,7 @@ To index all discovered user code repositories:
 kiv-scout index all
 ```
 
-`index all` scans common code roots under your home directory, such as `~/code`, `~/src`, `~/dev`, `~/projects`, `~/repos`, `~/work`, and `~/Developer`. It discovers git repositories while skipping package, build, cache, and virtualenv folders. To choose exact scan roots, set `KIV_SCOUT_INDEX_ROOTS` to a path-separated list.
+`index all` scans your home directory for git repositories by looking for `.git` folders. It skips package, build, cache, virtualenv, and common non-code folders so dependency directories are not indexed as user code. To choose exact scan roots instead, set `KIV_SCOUT_INDEX_ROOTS` to a path-separated list.
 
 To remove generated Kiv Scout database files:
 

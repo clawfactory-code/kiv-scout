@@ -285,7 +285,7 @@ fn index_all_repos() -> Result<()> {
     let repos = discover_user_repos()?;
     if repos.is_empty() {
         bail!(
-            "no repositories found under common code roots. Set KIV_SCOUT_INDEX_ROOTS to a path-separated list of roots to scan."
+            "no git repositories found. Set KIV_SCOUT_INDEX_ROOTS to a path-separated list of roots to scan."
         );
     }
     println!("Discovered {} repositories", repos.len());
@@ -313,7 +313,7 @@ fn remove_all_indexes() -> Result<()> {
     repos.dedup();
     if repos.is_empty() {
         bail!(
-            "no repositories found in the watchlist or common code roots. Set KIV_SCOUT_INDEX_ROOTS to a path-separated list of roots to scan."
+            "no git repositories found in the watchlist or scan roots. Set KIV_SCOUT_INDEX_ROOTS to a path-separated list of roots to scan."
         );
     }
     let mut total = 0;
@@ -373,25 +373,16 @@ fn index_scan_roots() -> Result<Vec<PathBuf>> {
         return Ok(env::split_paths(&roots).collect());
     }
     let home = env::var_os("HOME").context("HOME is not set; set KIV_SCOUT_INDEX_ROOTS")?;
-    let home = PathBuf::from(home);
-    Ok([
-        "code",
-        "src",
-        "dev",
-        "projects",
-        "repos",
-        "work",
-        "Developer",
-    ]
-    .iter()
-    .map(|name| home.join(name))
-    .filter(|path| path.exists())
-    .collect())
+    Ok(vec![PathBuf::from(home)])
 }
 
 fn should_descend_for_repo_discovery(entry: &DirEntry) -> bool {
-    let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-    if entry.depth() == 0 {
+    should_descend_for_repo_discovery_name(&entry.file_name().to_string_lossy(), entry.depth())
+}
+
+fn should_descend_for_repo_discovery_name(name: &str, depth: usize) -> bool {
+    let name = name.to_ascii_lowercase();
+    if depth == 0 {
         return true;
     }
     !matches!(
@@ -421,9 +412,19 @@ fn should_descend_for_repo_discovery(entry: &DirEntry) -> bool {
             | "coverage"
             | ".parcel-cache"
             | ".turbo"
+            | ".cache"
+            | ".cargo"
+            | ".npm"
+            | ".rustup"
+            | ".local"
+            | ".trash"
             | "library"
             | "applications"
             | "downloads"
+            | "movies"
+            | "music"
+            | "pictures"
+            | "public"
     ) && !name.starts_with(".venv-")
         && !name.starts_with(".venv_")
         && !name.starts_with("venv-")
@@ -1835,6 +1836,15 @@ mod tests {
         assert!(should_skip("personal/local-note.md"));
         assert!(!should_skip("src/main.rs"));
         assert!(!should_skip("README.md"));
+    }
+
+    #[test]
+    fn repo_discovery_prunes_dependency_and_cache_dirs() {
+        assert!(should_descend_for_repo_discovery_name("home", 0));
+        assert!(!should_descend_for_repo_discovery_name("node_modules", 1));
+        assert!(!should_descend_for_repo_discovery_name(".venv-local", 1));
+        assert!(!should_descend_for_repo_discovery_name(".Trash", 1));
+        assert!(should_descend_for_repo_discovery_name("codebase", 1));
     }
 
     #[test]
