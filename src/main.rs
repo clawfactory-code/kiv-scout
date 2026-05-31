@@ -6,7 +6,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -257,37 +257,118 @@ fn open_db_maybe_auto_index(root: &Path, auto_index: bool) -> Result<Connection>
 }
 
 fn auto_index_if_needed(root: &Path) -> Result<()> {
-    let reason = index_refresh_reason(root)?;
-    if let Some(reason) = reason {
+    let path = db_path(root);
+    if !path.exists() {
         if io::stderr().is_terminal() {
-            eprintln!("Auto-indexing {} ({reason})", root.display());
+            eprintln!("Auto-indexing {} (missing index)", root.display());
         }
         index_repo(root)?;
+        return Ok(());
+    }
+
+    let mut conn = Connection::open(&path).context("failed to open index database")?;
+    init_schema(&conn)?;
+    let result = update_index_incremental(&mut conn, root, &path)?;
+    if result.changed() && io::stderr().is_terminal() {
+        eprintln!(
+            "Auto-index updated {} ({} changed/new, {} removed)",
+            root.display(),
+            result.upserted,
+            result.deleted
+        );
     }
     Ok(())
 }
 
-fn index_refresh_reason(root: &Path) -> Result<Option<&'static str>> {
-    let path = db_path(root);
-    if !path.exists() {
-        return Ok(Some("missing index"));
-    }
-    if source_newer_than_index(root, &path)? {
-        return Ok(Some("source newer than index"));
-    }
-    Ok(None)
+#[derive(Debug, Default)]
+struct IncrementalIndexResult {
+    upserted: usize,
+    deleted: usize,
+    touched_unchanged: usize,
 }
 
-fn source_newer_than_index(root: &Path, index_path: &Path) -> Result<bool> {
-    let index_modified = modified_time(index_path)?;
-    for source in collect_source_paths(root)? {
-        if let Ok(modified) = modified_time(&source.abs)
-            && modified > index_modified
-        {
-            return Ok(true);
-        }
+impl IncrementalIndexResult {
+    fn changed(&self) -> bool {
+        self.upserted > 0 || self.deleted > 0
     }
-    Ok(false)
+
+    fn observed_newer_sources(&self) -> bool {
+        self.changed() || self.touched_unchanged > 0
+    }
+}
+
+fn update_index_incremental(
+    conn: &mut Connection,
+    root: &Path,
+    index_path: &Path,
+) -> Result<IncrementalIndexResult> {
+    let index_modified = modified_time(index_path)?;
+    let sources = collect_source_paths(root)?;
+    let existing = indexed_file_hashes(conn)?;
+    let current_paths = sources
+        .iter()
+        .map(|source| source.path.clone())
+        .collect::<BTreeSet<_>>();
+    let deleted = existing
+        .keys()
+        .filter(|path| !current_paths.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut upserts = Vec::new();
+    let mut touched_unchanged = 0;
+    for source in sources {
+        let known_hash = existing.get(&source.path);
+        let should_check = known_hash.is_none()
+            || modified_time(&source.abs)
+                .map(|modified| modified > index_modified)
+                .unwrap_or(false);
+        if !should_check {
+            continue;
+        }
+        let text = match fs::read_to_string(&source.abs) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        let hash = hash_text(&text);
+        if known_hash == Some(&hash) {
+            touched_unchanged += 1;
+            continue;
+        }
+        let symbols = extract_symbols(&source.lang, &text);
+        let imports = extract_imports(&source.lang, &text);
+        upserts.push(IndexedFile {
+            path: source.path,
+            lang: source.lang,
+            hash,
+            text,
+            symbols,
+            imports,
+        });
+    }
+
+    let result = IncrementalIndexResult {
+        upserted: upserts.len(),
+        deleted: deleted.len(),
+        touched_unchanged,
+    };
+    if result.observed_newer_sources() {
+        write_index_delta(conn, root, &upserts, &deleted)?;
+    }
+    Ok(result)
+}
+
+fn indexed_file_hashes(conn: &Connection) -> Result<BTreeMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT path, hash FROM files")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut hashes = BTreeMap::new();
+    for row in rows {
+        let (path, hash) = row?;
+        hashes.insert(path, hash);
+    }
+    Ok(hashes)
 }
 
 fn modified_time(path: &Path) -> Result<SystemTime> {
@@ -375,41 +456,79 @@ fn write_index(conn: &mut Connection, root: &Path, files: &[IndexedFile]) -> Res
     tx.execute("DELETE FROM imports", [])?;
     tx.execute("DELETE FROM file_fts", [])?;
 
+    write_metadata(&tx, root)?;
+
+    for file in files {
+        insert_indexed_file(&tx, file)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn write_index_delta(
+    conn: &mut Connection,
+    root: &Path,
+    upserts: &[IndexedFile],
+    deleted: &[String],
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    write_metadata(&tx, root)?;
+    for path in deleted {
+        delete_indexed_file(&tx, path)?;
+    }
+    for file in upserts {
+        delete_indexed_file(&tx, &file.path)?;
+        insert_indexed_file(&tx, file)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn write_metadata(tx: &rusqlite::Transaction<'_>, root: &Path) -> Result<()> {
     let indexed_at = Utc::now().to_rfc3339();
+    tx.execute("DELETE FROM metadata", [])?;
     tx.execute(
         "INSERT INTO metadata(key, value) VALUES ('repo_root', ?1), ('indexed_at', ?2), ('version', ?3)",
         params![root.display().to_string(), indexed_at, env!("CARGO_PKG_VERSION")],
     )?;
+    Ok(())
+}
 
-    for file in files {
+fn delete_indexed_file(tx: &rusqlite::Transaction<'_>, path: &str) -> Result<()> {
+    tx.execute("DELETE FROM files WHERE path = ?1", params![path])?;
+    tx.execute("DELETE FROM symbols WHERE file_path = ?1", params![path])?;
+    tx.execute("DELETE FROM imports WHERE file_path = ?1", params![path])?;
+    tx.execute("DELETE FROM file_fts WHERE path = ?1", params![path])?;
+    Ok(())
+}
+
+fn insert_indexed_file(tx: &rusqlite::Transaction<'_>, file: &IndexedFile) -> Result<()> {
+    tx.execute(
+        "INSERT INTO files(path, lang, hash, content) VALUES (?1, ?2, ?3, ?4)",
+        params![file.path, file.lang, file.hash, file.text],
+    )?;
+    let symbol_text = file
+        .symbols
+        .iter()
+        .map(|s| format!("{} {} {}", s.kind, s.name, s.signature))
+        .collect::<Vec<_>>()
+        .join("\n");
+    tx.execute(
+        "INSERT INTO file_fts(path, content, symbols) VALUES (?1, ?2, ?3)",
+        params![file.path, file.text, symbol_text],
+    )?;
+    for symbol in &file.symbols {
         tx.execute(
-            "INSERT INTO files(path, lang, hash, content) VALUES (?1, ?2, ?3, ?4)",
-            params![file.path, file.lang, file.hash, file.text],
+            "INSERT INTO symbols(file_path, name, kind, line, signature) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![file.path, symbol.name, symbol.kind, symbol.line as i64, symbol.signature],
         )?;
-        let symbol_text = file
-            .symbols
-            .iter()
-            .map(|s| format!("{} {} {}", s.kind, s.name, s.signature))
-            .collect::<Vec<_>>()
-            .join("\n");
-        tx.execute(
-            "INSERT INTO file_fts(path, content, symbols) VALUES (?1, ?2, ?3)",
-            params![file.path, file.text, symbol_text],
-        )?;
-        for symbol in &file.symbols {
-            tx.execute(
-                "INSERT INTO symbols(file_path, name, kind, line, signature) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![file.path, symbol.name, symbol.kind, symbol.line as i64, symbol.signature],
-            )?;
-        }
-        for import in &file.imports {
-            tx.execute(
-                "INSERT INTO imports(file_path, target) VALUES (?1, ?2)",
-                params![file.path, import],
-            )?;
-        }
     }
-    tx.commit()?;
+    for import in &file.imports {
+        tx.execute(
+            "INSERT INTO imports(file_path, target) VALUES (?1, ?2)",
+            params![file.path, import],
+        )?;
+    }
     Ok(())
 }
 

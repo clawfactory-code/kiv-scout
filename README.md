@@ -70,7 +70,7 @@ Indexing writes a local SQLite database to `/path/to/repo/.kiv/index.db`. In an 
 
 Kiv Scout skips common generated, package, and environment paths by default, including `.git`, `.kiv`, `node_modules`, `target`, build output directories, Python virtualenvs such as `.venv` and `venv`, `site-packages`, package lockfiles, source maps, and minified bundles.
 
-If you want query commands to build or refresh the index automatically when it is missing or older than source files, add `--auto-index`:
+If you want query commands to build or update the index automatically, add `--auto-index`. A missing index is built once; an existing index is updated incrementally by adding new files, refreshing changed files, and removing deleted files.
 
 ```bash
 kiv-scout --auto-index capsule "where is authentication checked?" --cap files
@@ -189,7 +189,7 @@ Kiv Scout looks for `kiv-scout.toml` in the current directory, or a path passed 
 
 The repository ships `kiv-scout.toml.example` as a blank template. Keep machine-specific paths in your local `kiv-scout.toml`; that file is ignored by git.
 
-Set `auto_index = true` to make `status`, `capsule`, and MCP context calls build or refresh `.kiv/index.db` automatically when needed. Auto-index checks source file modification times, so very large repositories may do extra filesystem scanning before each indexed query.
+Set `auto_index = true` to make `status`, `capsule`, and MCP context calls build or incrementally update `.kiv/index.db` automatically when needed. Auto-index compares the current source file list with the DB, hashes new or modified files, and removes deleted files. Very large repositories may still do extra filesystem scanning before each indexed query.
 
 ## Limitations
 
