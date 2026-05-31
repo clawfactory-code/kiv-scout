@@ -117,6 +117,8 @@ kiv-scout watcher start
 
 The watcher polls watched repositories and applies the same incremental updater used by `--auto-index`: new files are added, changed files are refreshed, and removed files are deleted from the DB. It writes updates to each repo's existing `.kiv/index.db`.
 
+On macOS and Linux, Kiv Scout uses built-in polling. It does not require the external Unix `watch` command, so macOS users do not need to install GNU `watch` with Homebrew.
+
 Useful watcher commands:
 
 ```bash

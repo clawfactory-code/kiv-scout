@@ -442,6 +442,7 @@ fn handle_watcher_command(command: WatcherCommands) -> Result<()> {
 
 fn start_watcher(interval_secs: u64, once: bool) -> Result<()> {
     let interval = Duration::from_secs(interval_secs.max(1));
+    eprintln!("{}", watcher_platform_note());
     loop {
         let repos = read_watchlist()?;
         if repos.is_empty() {
@@ -471,6 +472,20 @@ fn start_watcher(interval_secs: u64, once: bool) -> Result<()> {
             return Ok(());
         }
         sleep(interval);
+    }
+}
+
+fn watcher_platform_note() -> &'static str {
+    match env::consts::OS {
+        "macos" => {
+            "Kiv Scout watcher starting on macOS with built-in polling; no external `watch` command is required."
+        }
+        "linux" => {
+            "Kiv Scout watcher starting on Linux with built-in polling; no external `watch` command is required."
+        }
+        _ => {
+            "Kiv Scout watcher starting with built-in polling; no external `watch` command is required."
+        }
     }
 }
 
