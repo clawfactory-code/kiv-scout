@@ -257,7 +257,7 @@ Set `auto_index = true` to make `status`, `capsule`, and MCP context calls build
 
 ## Limitations
 
-- The index is local and explicit; run `kiv-scout index` after meaningful repo changes.
+- The index is local and explicit; run `kiv-scout index` after meaningful repo changes, or use auto update flag, or have watcher running to be able to fetch latest code.
 - Tree-sitter extraction is currently strongest for Rust, TypeScript, JavaScript, and Python.
 - Ranking is lexical and symbol-aware, not semantic.
 - MCP output is intentionally bounded and may omit useful context until you raise caps.
