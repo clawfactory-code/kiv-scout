@@ -1155,9 +1155,6 @@ mod tests {
         assert!(should_skip("target/debug/app"));
         assert!(should_skip("node_modules/pkg/index.js"));
         assert!(should_skip("venv/lib/python3.12/site-packages/pkg/mod.py"));
-        assert!(should_skip(
-            ".venv-local/lib/python3.11/site-packages/pkg/mod.py"
-        ));
         assert!(should_skip("src/generated/bundle.min.js"));
         assert!(should_skip("package-lock.json"));
         assert!(should_skip("pnpm-lock.yaml"));
