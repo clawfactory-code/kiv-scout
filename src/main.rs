@@ -1160,7 +1160,9 @@ fn relative_path(root: &Path, abs: &Path) -> Result<String> {
 pub(crate) fn should_skip(rel: &str) -> bool {
     let lower_rel = rel.to_ascii_lowercase();
     let parts: Vec<&str> = rel.split('/').collect();
-    parts.iter().any(|part| {
+    parts.windows(2).any(|parts| {
+        parts[0].eq_ignore_ascii_case(".claude") && parts[1].eq_ignore_ascii_case("worktrees")
+    }) || parts.iter().any(|part| {
         let lower = part.to_ascii_lowercase();
         matches!(
             lower.as_str(),
@@ -1827,6 +1829,10 @@ mod tests {
     fn skips_generated_dirs() {
         assert!(should_skip("target/debug/app"));
         assert!(should_skip("node_modules/pkg/index.js"));
+        assert!(should_skip(".claude/worktrees/worker-123/src/duplicate.rs"));
+        assert!(should_skip(
+            "packages/app/.claude/worktrees/worker-123/src/duplicate.rs"
+        ));
         assert!(should_skip("venv/lib/python3.12/site-packages/pkg/mod.py"));
         assert!(should_skip("src/generated/bundle.min.js"));
         assert!(should_skip("package-lock.json"));

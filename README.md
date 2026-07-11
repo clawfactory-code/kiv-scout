@@ -71,7 +71,7 @@ kiv-scout index /path/to/repo
 
 Indexing writes a local SQLite database to `/path/to/repo/.kiv/index.db`. In an interactive terminal, the index command prints progress phases and a file-count progress bar to stderr.
 
-Kiv Scout skips common generated, package, and environment paths by default, including `.git`, `.kiv`, `node_modules`, `target`, build output directories, Python virtualenvs such as `.venv` and `venv`, `site-packages`, package lockfiles, source maps, and minified bundles.
+Kiv Scout skips common generated, package, and environment paths by default, including `.git`, `.kiv`, `node_modules`, `target`, build output directories, Python virtualenvs such as `.venv` and `venv`, `site-packages`, package lockfiles, source maps, and minified bundles. Nested Claude Code checkouts under `.claude/worktrees/` are also excluded so stale copies do not outrank files in the active repository.
 
 To index all discovered user code repositories:
 
