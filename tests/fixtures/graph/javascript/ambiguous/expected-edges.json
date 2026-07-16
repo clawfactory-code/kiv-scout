@@ -1,0 +1,15 @@
+{
+  "language": "javascript",
+  "edges": [
+    {
+      "source_path": "src/app.js",
+      "raw_target": "./thing",
+      "expected_target": null,
+      "kind": "require",
+      "line": 1,
+      "resolution": "ambiguous",
+      "resolver": "typescript-relative-v1",
+      "candidate_paths": ["src/thing.js", "src/thing/index.js"]
+    }
+  ]
+}

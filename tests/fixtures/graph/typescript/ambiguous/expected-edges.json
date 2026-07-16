@@ -1,0 +1,15 @@
+{
+  "language": "typescript",
+  "edges": [
+    {
+      "source_path": "src/app.ts",
+      "raw_target": "./thing",
+      "expected_target": null,
+      "kind": "import",
+      "line": 1,
+      "resolution": "ambiguous",
+      "resolver": "typescript-relative-v1",
+      "candidate_paths": ["src/thing.ts", "src/thing/index.ts"]
+    }
+  ]
+}

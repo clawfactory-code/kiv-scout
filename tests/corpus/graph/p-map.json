@@ -1,0 +1,27 @@
+{
+  "repo": "sindresorhus/p-map",
+  "language": "javascript",
+  "observations": [
+    {
+      "source_path": "test.js",
+      "raw_target": "./assert-in-range.js",
+      "line": 5,
+      "expected_target": "assert-in-range.js",
+      "resolution": "exact"
+    },
+    {
+      "source_path": "test.js",
+      "raw_target": "./index.js",
+      "line": 6,
+      "expected_target": "index.js",
+      "resolution": "exact"
+    },
+    {
+      "source_path": "index.test-d.ts",
+      "raw_target": "./index.js",
+      "line": 2,
+      "expected_target": "index.js",
+      "resolution": "exact"
+    }
+  ]
+}

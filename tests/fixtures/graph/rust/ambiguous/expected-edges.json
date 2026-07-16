@@ -1,0 +1,15 @@
+{
+  "language": "rust",
+  "edges": [
+    {
+      "source_path": "src/lib.rs",
+      "raw_target": "thing",
+      "expected_target": null,
+      "kind": "module",
+      "line": 1,
+      "resolution": "ambiguous",
+      "resolver": "rust-local-v1",
+      "candidate_paths": ["src/thing.rs", "src/thing/mod.rs"]
+    }
+  ]
+}

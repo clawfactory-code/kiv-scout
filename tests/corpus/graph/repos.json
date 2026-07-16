@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "repositories": [
+    {
+      "repo": "sharkdp/fd",
+      "language": "rust",
+      "commit": "1bfeea237a48c9545211e5c21d623d398fa712c6",
+      "checkout_dir": "fd",
+      "oracle": "fd.json"
+    },
+    {
+      "repo": "pallets/itsdangerous",
+      "language": "python",
+      "commit": "672971d66a2ef9f85151e53283113f33d642dabd",
+      "checkout_dir": "itsdangerous",
+      "oracle": "itsdangerous.json"
+    },
+    {
+      "repo": "sindresorhus/p-map",
+      "language": "javascript",
+      "commit": "3ada5f36632aca8df860c376856270b6d2ba2de8",
+      "checkout_dir": "p-map",
+      "oracle": "p-map.json"
+    }
+  ]
+}

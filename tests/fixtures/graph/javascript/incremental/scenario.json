@@ -1,0 +1,12 @@
+{
+  "language": "javascript",
+  "source": {"path": "src/app.js", "text": "const thing = require('./thing');\n"},
+  "target": {"path": "src/thing.js", "text": "module.exports = 1;\n"},
+  "renamed_target": {"path": "src/renamed.js", "text": "module.exports = 1;\n"},
+  "expected": {
+    "initial": {"resolution": "unresolved", "target_path": null},
+    "added": {"resolution": "exact", "target_path": "src/thing.js"},
+    "deleted": {"resolution": "unresolved", "target_path": null},
+    "renamed": {"resolution": "unresolved", "target_path": null}
+  }
+}

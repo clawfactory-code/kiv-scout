@@ -12,6 +12,9 @@ It indexes source files into a local SQLite database, extracts symbols and impor
 - Fast ranked capsules using SQLite FTS5 with scan fallback
 - File skeletons built from imports and symbols
 - Tree-sitter extraction for Rust, TypeScript, JavaScript, and Python
+- Evidence-bearing exact, ambiguous, and unresolved local dependency edges
+- Bounded query- and diff-driven impact analysis with changed-symbol ranges
+- Opt-in graph-expanded capsules and explicit architecture boundary policies
 - Regex fallback for additional common languages
 - Minimal JSON-lines MCP server over stdio
 - Conservative MCP output limits for agent context control
@@ -122,7 +125,31 @@ Inspect a large file before opening it fully:
 kiv-scout skeleton src/main.rs --detail minimal
 ```
 
-Benchmark the local index/status/capsule/skeleton paths:
+Show exact forward dependencies, reverse blast radius, and likely tests from up
+to three lexical pivots:
+
+```bash
+kiv-scout impact "auth token validation" --depth 2 --include-tests
+kiv-scout impact "auth token validation" --format json
+```
+
+During review, use the local working-tree diff as the pivot source. This runs a
+read-only `git diff --unified=0 --no-ext-diff <ref> --`; it does not fetch,
+stage, checkout, or otherwise change Git state.
+
+```bash
+kiv-scout impact --diff origin/main --depth 2 --include-tests
+```
+
+Graph expansion for capsules is explicit. Without `--related`, capsule output
+uses the existing lexical path unchanged.
+
+```bash
+kiv-scout capsule "auth token validation" --cap balanced \
+  --related deps,rdeps,tests --related-depth 1
+```
+
+Benchmark local status, capsule, graph-impact, graph-expanded capsule, and skeleton paths:
 
 ```bash
 kiv-scout bench --repo /path/to/repo
@@ -193,8 +220,15 @@ Available MCP tools:
 - `index_status`
 - `get_skeleton`
 - `get_context_capsule`
+- `get_change_impact`
+- `check_architecture_boundaries`
 
 MCP responses are intentionally more conservative than CLI responses. By default, `get_context_capsule` rejects full mode, uses files-only output, clamps token and file counts, and truncates returned text.
+
+`get_change_impact` accepts exactly one of `query` or `diff`, clamps graph depth
+to three, and returns bounded Markdown plus structured file roles and evidence.
+`check_architecture_boundaries` is read-only and returns success with no
+violations when the repository has no explicit policy.
 
 ## Capsule Budgets
 
@@ -258,11 +292,94 @@ The repository ships `kiv-scout.toml.example` as a blank template. Keep machine-
 
 Set `auto_index = true` to make `status`, `capsule`, and MCP context calls build or incrementally update `.kiv/index.db` automatically when needed. Auto-index compares the current source file list with the DB, hashes new or modified files, and removes deleted files. Very large repositories may still do extra filesystem scanning before each indexed query.
 
+Generated indexes carry a schema version. A normal `kiv-scout index` rebuilds
+an incompatible generated database; auto-index and watcher paths instead give
+an actionable rebuild error rather than guessing at a migration.
+
+## Dependency Resolution Contract
+
+Kiv stores every observed import with its source path, raw target, kind, line,
+resolver, and one of three states:
+
+- `exact`: exactly one indexed repo-relative target; traversable by impact and policy checks.
+- `ambiguous`: multiple sorted candidates; visible as evidence but never traversed.
+- `unresolved`: external, unsupported, or otherwise unprovable; visible but never traversed.
+
+The first supported slice is deliberately conservative:
+
+- TypeScript/JavaScript: relative specifiers using exact files, supported source extensions, and `index` files.
+- Python: explicit relative modules and absolute module paths that match exactly one indexed package root.
+- Rust: external `mod`, `crate::`, `self::`, `super::`, and unprefixed paths only when an indexed local module proves the first segment. Bare wildcard prefixes fail closed.
+- Other languages: raw observations remain unresolved.
+
+Package exports, TypeScript aliases, environment-dependent Python namespaces,
+external crates/packages, and function-call graphs are outside this contract.
+Status reports exact, ambiguous, and unresolved counts so graph coverage is
+visible rather than implied.
+
+## Architecture Boundary Checks
+
+Kiv has no built-in layer names or opinions. A repository can opt in with
+explicit `globset` patterns and deny rules:
+
+```toml
+[architecture]
+enabled = true
+
+[[architecture.layers]]
+name = "domain"
+include = ["src/domain/**"]
+
+[[architecture.layers]]
+name = "infrastructure"
+include = ["src/infrastructure/**"]
+
+[[architecture.rules]]
+from = "domain"
+deny = ["infrastructure"]
+```
+
+Run the full policy or one file's outgoing edges:
+
+```bash
+kiv-scout check boundaries
+kiv-scout check boundaries --path src/domain/order.ts --format json
+```
+
+Only exact edges can violate a rule. Unclassified files and unresolved imports
+are counted but do not fail. Overlapping layer matches, malformed globs,
+unknown rule references, and empty deny lists are configuration errors.
+Configured violations return a non-zero exit status for CI; an absent or
+disabled policy prints `no architecture policy configured` and succeeds.
+
+## Graph Correctness Evaluation
+
+The offline evaluator uses independent expected-edge JSON for Rust, Python,
+TypeScript, and JavaScript. It checks exact, ambiguous, unresolved, target-only
+incremental add/delete/rename behavior, per-language metrics, and one semantic
+digest across twenty varied construction orders:
+
+```bash
+cargo test graph_eval -- --nocapture
+```
+
+The compact contract fixtures currently produce 100% exact precision/recall
+and ambiguity accuracy in each supported language. A pinned, opt-in public
+oracle for `fd`, `itsdangerous`, and `p-map` lives in `tests/corpus/graph`.
+Follow its README to reproduce it.
+
+That reviewed public sample is intentionally small. It does not establish the
+broad 99% precision, 95% supported recall, 90% test-impact, or latency gates
+required for enabling graph expansion by default. Impact and graph-expanded
+capsules therefore remain advisory and opt-in.
+
 ## Limitations
 
 - The index is local and explicit; run `kiv-scout index` after meaningful codebase changes, use `--auto-index`, or keep `kiv-scout watcher start` running to update the index incrementally.
 - Tree-sitter extraction is currently strongest for Rust, TypeScript, JavaScript, and Python.
 - Ranking is lexical and symbol-aware, not semantic.
+- Exact dependency coverage is intentionally narrower than compiler/package-manager resolution; ambiguous and unsupported observations fail closed.
+- Likely tests are opt-in and incomplete; Kiv does not claim to select every test affected by a change.
 - MCP output is intentionally bounded and may omit useful context until you raise caps.
 - Calling it too often in a long agent conversation can create context bloat; use clear triggers.
 

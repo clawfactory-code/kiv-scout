@@ -1,5 +1,8 @@
 use anyhow::{Result, bail};
 use rusqlite::{Connection, params};
+use serde::Serialize;
+
+use super::impact::{ImpactResult, ImpactRole};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CapsuleMode {
@@ -138,11 +141,123 @@ pub(crate) fn capsule(
     Ok(out)
 }
 
+pub(crate) fn graph_capsule(
+    conn: &Connection,
+    query: &str,
+    result: &ImpactResult,
+    max_tokens: usize,
+    mode: CapsuleMode,
+) -> Result<String> {
+    let mut out = String::from("# Kiv Scout Context Capsule\n\n");
+    out.push_str(&format!("**Query:** {query}\n\n"));
+    out.push_str(&format!("**Mode:** {} + exact graph\n\n", mode.label()));
+    let mut used = estimate_tokens(&out);
+    let mut current_group = None;
+    let mut rendered = 0usize;
+    for file in &result.files {
+        let group = if file.roles.contains(&ImpactRole::Pivot) {
+            "Pivot Files"
+        } else if file.roles.contains(&ImpactRole::Dependency) {
+            "Dependencies"
+        } else if file.roles.contains(&ImpactRole::Dependent) {
+            "Blast Radius"
+        } else {
+            "Likely Tests"
+        };
+        let heading = (current_group != Some(group)).then(|| format!("## {group}\n\n"));
+        let roles = file
+            .roles
+            .iter()
+            .map(|role| format!("{role:?}").to_lowercase())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let row = conn.query_row(
+            "SELECT lang, content FROM files WHERE path = ?1",
+            params![file.path],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        );
+        let section = match row {
+            Ok((lang, content)) => {
+                if mode == CapsuleMode::FilesOnly {
+                    format!(
+                        "- {} (roles: {}; depth {}{})\n",
+                        file.path,
+                        roles,
+                        file.depth,
+                        file.score
+                            .map(|score| format!("; score {score:.2}"))
+                            .unwrap_or_default()
+                    )
+                } else {
+                    let ranked = RankedFile {
+                        path: file.path.clone(),
+                        lang,
+                        content,
+                        score: file.score.unwrap_or(0.0),
+                    };
+                    format!(
+                        "**Roles:** {roles}; depth {}\n\n{}",
+                        file.depth,
+                        ranked.render(query, mode)
+                    )
+                }
+            }
+            Err(_) => format!(
+                "- {} (roles: {}; depth {}; unindexed)\n",
+                file.path, roles, file.depth
+            ),
+        };
+        let addition = format!("{}{}", heading.as_deref().unwrap_or(""), section);
+        let tokens = estimate_tokens(&addition);
+        if used + tokens > max_tokens {
+            break;
+        }
+        used += tokens;
+        if let Some(heading) = heading {
+            out.push_str(&heading);
+            current_group = Some(group);
+        }
+        out.push_str(&section);
+        rendered += 1;
+    }
+    if rendered < result.files.len() || result.truncated {
+        out.push_str(&format!(
+            "\n> Related output truncated; {} files rendered and {} graph files omitted.\n",
+            rendered, result.omitted_files
+        ));
+    }
+    out.push_str(&format!("\n> Estimated tokens: {used}/{max_tokens}\n"));
+    while estimate_tokens(&out) > max_tokens {
+        out.pop();
+    }
+    Ok(out)
+}
+
 struct RankedFile {
     path: String,
     lang: String,
     content: String,
     score: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RankedPath {
+    pub(crate) path: String,
+    pub(crate) score: f64,
+}
+
+pub(crate) fn ranked_paths(
+    conn: &Connection,
+    query: &str,
+    include_tests: bool,
+) -> Result<Vec<RankedPath>> {
+    Ok(ranked_files(conn, query, include_tests)?
+        .into_iter()
+        .map(|file| RankedPath {
+            path: file.path,
+            score: file.score,
+        })
+        .collect())
 }
 
 impl RankedFile {
@@ -258,7 +373,6 @@ fn ranked_files_fts(
         ranked.push(file);
     }
     ranked.sort_by(compare_ranked_files);
-    ranked.truncate(8);
     Ok(ranked)
 }
 
@@ -314,7 +428,6 @@ fn ranked_files_scan(
         }
     }
     ranked.sort_by(compare_ranked_files);
-    ranked.truncate(8);
     Ok(ranked)
 }
 
@@ -349,7 +462,7 @@ fn imports_for(conn: &Connection, path: &str) -> Result<Vec<String>> {
         .map_err(Into::into)
 }
 
-fn is_test_path(path: &str) -> bool {
+pub(crate) fn is_test_path(path: &str) -> bool {
     path.contains("/test")
         || path.contains("/tests")
         || path.ends_with("_test.rs")
@@ -383,6 +496,71 @@ fn best_excerpt(content: &str, query: &str, radius: usize) -> String {
     out
 }
 
-fn estimate_tokens(text: &str) -> usize {
+pub(crate) fn estimate_tokens(text: &str) -> usize {
     (text.len() / 4).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn indexed_matches(count: usize) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE files (
+                path TEXT PRIMARY KEY,
+                lang TEXT NOT NULL,
+                hash TEXT NOT NULL,
+                content TEXT NOT NULL
+            );
+            CREATE TABLE symbols (
+                id INTEGER PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                line INTEGER NOT NULL,
+                signature TEXT NOT NULL
+            );
+            CREATE TABLE imports (
+                id INTEGER PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                target TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE file_fts USING fts5(path, content, symbols);
+            ",
+        )
+        .unwrap();
+
+        for index in 0..count {
+            let path = format!("src/file_{index:02}.rs");
+            let content = format!("pub fn needle_{index}() {{}}");
+            conn.execute(
+                "INSERT INTO files(path, lang, hash, content) VALUES (?1, 'rust', ?2, ?3)",
+                params![path, index.to_string(), content],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO file_fts(path, content, symbols) VALUES (?1, ?2, ?3)",
+                params![path, content, format!("function needle_{index}")],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn ranking_and_capsule_honor_file_limits_above_eight() {
+        let conn = indexed_matches(12);
+
+        assert_eq!(ranked_files_fts(&conn, "needle", true).unwrap().len(), 12);
+        assert_eq!(ranked_files_scan(&conn, "needle", true).unwrap().len(), 12);
+
+        let output = capsule(&conn, "needle", 10_000, true, CapsuleMode::FilesOnly, 12).unwrap();
+        let pivot_count = output
+            .lines()
+            .filter(|line| line.starts_with("- src/file_"))
+            .count();
+        assert_eq!(pivot_count, 12);
+    }
 }

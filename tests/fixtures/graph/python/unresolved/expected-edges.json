@@ -1,0 +1,15 @@
+{
+  "language": "python",
+  "edges": [
+    {
+      "source_path": "app.py",
+      "raw_target": "missing.module",
+      "expected_target": null,
+      "kind": "import",
+      "line": 1,
+      "resolution": "unresolved",
+      "resolver": "python-module-v1",
+      "candidate_paths": []
+    }
+  ]
+}

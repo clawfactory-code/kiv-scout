@@ -1,0 +1,12 @@
+{
+  "language": "typescript",
+  "source": {"path": "src/app.ts", "text": "import { value } from './thing';\n"},
+  "target": {"path": "src/thing.ts", "text": "export const value = 1;\n"},
+  "renamed_target": {"path": "src/renamed.ts", "text": "export const value = 1;\n"},
+  "expected": {
+    "initial": {"resolution": "unresolved", "target_path": null},
+    "added": {"resolution": "exact", "target_path": "src/thing.ts"},
+    "deleted": {"resolution": "unresolved", "target_path": null},
+    "renamed": {"resolution": "unresolved", "target_path": null}
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "repo": "sharkdp/fd",
+  "language": "rust",
+  "observations": [
+    {
+      "source_path": "src/main.rs",
+      "raw_target": "cli",
+      "line": 1,
+      "expected_target": "src/cli.rs",
+      "resolution": "exact"
+    },
+    {
+      "source_path": "src/main.rs",
+      "raw_target": "config",
+      "line": 2,
+      "expected_target": "src/config.rs",
+      "resolution": "exact"
+    },
+    {
+      "source_path": "src/main.rs",
+      "raw_target": "filter",
+      "line": 9,
+      "expected_target": "src/filter/mod.rs",
+      "resolution": "exact"
+    }
+  ]
+}

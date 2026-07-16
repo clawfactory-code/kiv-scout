@@ -1,0 +1,27 @@
+{
+  "repo": "pallets/itsdangerous",
+  "language": "python",
+  "observations": [
+    {
+      "source_path": "src/itsdangerous/signer.py",
+      "raw_target": ".encoding",
+      "line": 8,
+      "expected_target": "src/itsdangerous/encoding.py",
+      "resolution": "exact"
+    },
+    {
+      "source_path": "src/itsdangerous/signer.py",
+      "raw_target": ".exc",
+      "line": 12,
+      "expected_target": "src/itsdangerous/exc.py",
+      "resolution": "exact"
+    },
+    {
+      "source_path": "src/itsdangerous/serializer.py",
+      "raw_target": ".signer",
+      "line": 10,
+      "expected_target": "src/itsdangerous/signer.py",
+      "resolution": "exact"
+    }
+  ]
+}

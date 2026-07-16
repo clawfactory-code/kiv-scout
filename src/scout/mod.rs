@@ -9,7 +9,14 @@ use std::time::Instant;
 use walkdir::WalkDir;
 
 mod capsule;
-pub(crate) use capsule::{CapsuleCap, CapsuleMode, capsule, render_skeleton};
+pub(crate) mod diff;
+mod impact;
+pub(crate) mod policy;
+pub(crate) use capsule::{CapsuleCap, CapsuleMode, capsule, graph_capsule, render_skeleton};
+pub(crate) use impact::{
+    ImpactOptions, ImpactResult, ImpactRole, impact_from_paths, impact_from_query,
+    render_markdown as render_impact_markdown, render_markdown_with_pivot_heading,
+};
 
 #[derive(Args)]
 pub struct BenchArgs {
@@ -60,22 +67,43 @@ pub fn bench_command(args: BenchArgs) -> Result<()> {
 fn bench(repo: &Path, query: &str, runs: usize) -> Result<BenchReport> {
     let repo = fs::canonicalize(repo).with_context(|| format!("bad repo {}", repo.display()))?;
     let binary = current_binary()?;
-    let mut results = Vec::new();
-
-    results.push(time_command(
-        "status",
-        &binary,
-        &["status", repo.to_str().context("non-utf8 repo path")?],
-        &repo,
-        runs.max(1),
-    )?);
-    results.push(time_command(
-        "capsule",
-        &binary,
-        &["capsule", query, "--cap", "balanced"],
-        &repo,
-        runs.max(1),
-    )?);
+    let mut results = vec![
+        time_command(
+            "status",
+            &binary,
+            &["status", repo.to_str().context("non-utf8 repo path")?],
+            &repo,
+            runs.max(1),
+        )?,
+        time_command(
+            "capsule",
+            &binary,
+            &["capsule", query, "--cap", "balanced"],
+            &repo,
+            runs.max(1),
+        )?,
+        time_command(
+            "impact depth=2",
+            &binary,
+            &["impact", query, "--depth", "2", "--format", "json"],
+            &repo,
+            runs.max(1),
+        )?,
+        time_command(
+            "capsule + graph",
+            &binary,
+            &[
+                "capsule",
+                query,
+                "--cap",
+                "balanced",
+                "--related",
+                "deps,rdeps,tests",
+            ],
+            &repo,
+            runs.max(1),
+        )?,
+    ];
 
     if let Some(file) = largest_supported_file(&repo) {
         results.push(time_command(

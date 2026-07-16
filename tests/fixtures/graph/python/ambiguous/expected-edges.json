@@ -1,0 +1,15 @@
+{
+  "language": "python",
+  "edges": [
+    {
+      "source_path": "app.py",
+      "raw_target": "pkg.tool",
+      "expected_target": null,
+      "kind": "import",
+      "line": 1,
+      "resolution": "ambiguous",
+      "resolver": "python-module-v1",
+      "candidate_paths": ["one/pkg/tool.py", "two/pkg/tool.py"]
+    }
+  ]
+}

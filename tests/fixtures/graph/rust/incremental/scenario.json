@@ -1,0 +1,12 @@
+{
+  "language": "rust",
+  "source": {"path": "src/lib.rs", "text": "mod thing;\n"},
+  "target": {"path": "src/thing.rs", "text": "pub fn value() {}\n"},
+  "renamed_target": {"path": "src/renamed.rs", "text": "pub fn value() {}\n"},
+  "expected": {
+    "initial": {"resolution": "unresolved", "target_path": null},
+    "added": {"resolution": "exact", "target_path": "src/thing.rs"},
+    "deleted": {"resolution": "unresolved", "target_path": null},
+    "renamed": {"resolution": "unresolved", "target_path": null}
+  }
+}

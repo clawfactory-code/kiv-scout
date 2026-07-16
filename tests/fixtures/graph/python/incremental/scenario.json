@@ -1,0 +1,12 @@
+{
+  "language": "python",
+  "source": {"path": "pkg/use.py", "text": "from .local import value\n"},
+  "target": {"path": "pkg/local.py", "text": "value = 1\n"},
+  "renamed_target": {"path": "pkg/renamed.py", "text": "value = 1\n"},
+  "expected": {
+    "initial": {"resolution": "unresolved", "target_path": null},
+    "added": {"resolution": "exact", "target_path": "pkg/local.py"},
+    "deleted": {"resolution": "unresolved", "target_path": null},
+    "renamed": {"resolution": "unresolved", "target_path": null}
+  }
+}

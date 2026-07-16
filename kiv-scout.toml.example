@@ -11,3 +11,19 @@
 # MCP defaults are intentionally conservative. Raise these for larger context windows.
 # mcp_max_tokens = 900
 # mcp_max_files = 10
+
+# Architecture policy is explicit and disabled unless enabled here.
+# [architecture]
+# enabled = true
+#
+# [[architecture.layers]]
+# name = "domain"
+# include = ["src/domain/**"]
+#
+# [[architecture.layers]]
+# name = "infrastructure"
+# include = ["src/infrastructure/**"]
+#
+# [[architecture.rules]]
+# from = "domain"
+# deny = ["infrastructure"]

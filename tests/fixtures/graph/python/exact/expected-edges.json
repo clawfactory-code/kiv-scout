@@ -1,0 +1,15 @@
+{
+  "language": "python",
+  "edges": [
+    {
+      "source_path": "pkg/use.py",
+      "raw_target": ".local",
+      "expected_target": "pkg/local.py",
+      "kind": "import",
+      "line": 1,
+      "resolution": "exact",
+      "resolver": "python-module-v1",
+      "candidate_paths": []
+    }
+  ]
+}

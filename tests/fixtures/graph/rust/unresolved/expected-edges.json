@@ -1,0 +1,15 @@
+{
+  "language": "rust",
+  "edges": [
+    {
+      "source_path": "src/lib.rs",
+      "raw_target": "std::fs",
+      "expected_target": null,
+      "kind": "use",
+      "line": 1,
+      "resolution": "unresolved",
+      "resolver": "rust-local-v1",
+      "candidate_paths": []
+    }
+  ]
+}
