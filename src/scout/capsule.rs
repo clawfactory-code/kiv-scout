@@ -56,13 +56,13 @@ impl CapsuleCap {
             }),
             "balanced" | "agent" => Ok(Self {
                 mode: CapsuleMode::Compact,
-                max_tokens: 6000,
-                max_files: 12,
+                max_tokens: 8000,
+                max_files: 24,
             }),
             "full" => Ok(Self {
                 mode: CapsuleMode::Full,
-                max_tokens: 8000,
-                max_files: 8,
+                max_tokens: 12000,
+                max_files: 12,
             }),
             "wide" => Ok(Self {
                 mode: CapsuleMode::FilesOnly,
@@ -71,8 +71,8 @@ impl CapsuleCap {
             }),
             "deep" => Ok(Self {
                 mode: CapsuleMode::Full,
-                max_tokens: 16000,
-                max_files: 12,
+                max_tokens: 32000,
+                max_files: 24,
             }),
             _ => bail!("unknown cap preset '{value}'"),
         }

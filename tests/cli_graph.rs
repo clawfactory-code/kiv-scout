@@ -1,7 +1,8 @@
 use serde_json::Value;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn binary() -> &'static str {
@@ -41,6 +42,21 @@ fn run(root: &Path, args: &[&str]) -> Output {
 
 fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
+}
+
+fn mcp_call(root: &Path, request: Value) -> Value {
+    let mut child = Command::new(binary())
+        .args(["mcp", root.to_str().unwrap()])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(child.stdin.as_mut().unwrap(), "{request}").unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", stdout(&output));
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 #[test]
@@ -138,5 +154,87 @@ fn absent_policy_is_a_successful_no_op() {
     let check = run(&root, &["check", "boundaries"]);
     assert!(check.status.success());
     assert_eq!(stdout(&check).trim(), "no architecture policy configured");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn mcp_defaults_return_model_sized_context_and_complete_skeletons() {
+    let root = temporary_repo("mcp-context-limits");
+    for index in 0..24 {
+        fs::write(
+            root.join(format!("src/domain/context_{index:02}.ts")),
+            format!("export function whole_context_{index:02}() {{ return {index}; }}\n"),
+        )
+        .unwrap();
+    }
+    let large_source = (0..150)
+        .map(|index| format!("export function function_{index:03}() {{ return {index}; }}\n"))
+        .collect::<String>();
+    fs::write(root.join("src/domain/large.ts"), large_source).unwrap();
+    assert!(
+        run(&root, &["index", root.to_str().unwrap()])
+            .status
+            .success()
+    );
+
+    let compact = mcp_call(
+        &root,
+        serde_json::json!({
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "get_context_capsule",
+                "arguments": {"query": "whole_context"}
+            }
+        }),
+    );
+    let compact = compact["result"]["content"].as_str().unwrap();
+    assert!(compact.contains("**Mode:** compact"));
+    assert_eq!(
+        compact
+            .lines()
+            .filter(|line| line.starts_with("### src/domain/context_"))
+            .count(),
+        24
+    );
+
+    let full = mcp_call(
+        &root,
+        serde_json::json!({
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "get_context_capsule",
+                "arguments": {
+                    "query": "whole_context",
+                    "mode": "full",
+                    "max_tokens": 24000,
+                    "max_files": 20
+                }
+            }
+        }),
+    );
+    assert!(
+        full["result"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("**Mode:** full")
+    );
+
+    let skeleton = mcp_call(
+        &root,
+        serde_json::json!({
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "get_skeleton",
+                "arguments": {"file": "src/domain/large.ts", "detail": "standard"}
+            }
+        }),
+    );
+    let skeleton = skeleton["result"]["content"].as_str().unwrap();
+    assert!(skeleton.contains("function_149"));
+    assert!(!skeleton.contains("truncated by Kiv Scout MCP cap"));
+
     fs::remove_dir_all(root).unwrap();
 }

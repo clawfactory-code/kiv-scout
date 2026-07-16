@@ -17,7 +17,7 @@ It indexes source files into a local SQLite database, extracts symbols and impor
 - Opt-in graph-expanded capsules and explicit architecture boundary policies
 - Regex fallback for additional common languages
 - Minimal JSON-lines MCP server over stdio
-- Conservative MCP output limits for agent context control
+- Model-sized MCP output limits with explicit per-repository caps
 
 ## Install
 
@@ -117,6 +117,13 @@ Then ask for compact context when the file list looks plausible:
 
 ```bash
 kiv-scout capsule "where is authentication checked?" --cap balanced
+```
+
+For a cross-surface task whose ranked files are already plausible, request the
+larger full-source view and include tests:
+
+```bash
+kiv-scout capsule "auth middleware request tests" --cap deep --include-tests
 ```
 
 Inspect a large file before opening it fully:
@@ -223,10 +230,16 @@ Available MCP tools:
 - `get_change_impact`
 - `check_architecture_boundaries`
 
-MCP responses are intentionally more conservative than CLI responses. By default, `get_context_capsule` rejects full mode, uses files-only output, clamps token and file counts, and truncates returned text.
+MCP responses use model-sized bounds rather than the old pointer-only clamp. By
+default, `get_context_capsule` returns compact context for up to 24 files and
+8,000 estimated tokens. Clients may request full mode up to the MCP cap (40
+files and 32,000 tokens by default). Repository configuration can lower or
+raise those ceilings within Kiv's hard safety bounds.
 
 `get_change_impact` accepts exactly one of `query` or `diff`, clamps graph depth
 to three, and returns bounded Markdown plus structured file roles and evidence.
+Its model-oriented default is 40 graph files / 12,000 tokens so a typical
+cross-surface neighborhood is not silently reduced to its first few files.
 `check_architecture_boundaries` is read-only and returns success with no
 violations when the repository has no explicit policy.
 
@@ -238,24 +251,25 @@ Capsule presets:
 |---|---:|---:|---|
 | `files` | files-only | 20 files / 1200 tokens | First pass |
 | `tight` | compact | 8 files / 2400 tokens | Small agent context |
-| `balanced` | compact | 12 files / 6000 tokens | Normal agent context |
-| `full` | full | 8 files / 8000 tokens | Human inspection |
+| `balanced` | compact | 24 files / 8000 tokens | Normal agent context |
+| `full` | full | 12 files / 12000 tokens | Human inspection |
 | `wide` | files-only | 40 files / 3000 tokens | Broad repo scan |
-| `deep` | full | 12 files / 16000 tokens | Larger source excerpts |
+| `deep` | full | 24 files / 32000 tokens | Cross-surface source and tests |
 
 Override presets from the CLI:
 
 ```bash
-kiv-scout capsule "where is auth checked?" --cap balanced --max-files 20 --max-tokens 12000
+kiv-scout capsule "where is auth checked?" --cap deep --max-files 24 --max-tokens 32000
 ```
 
-MCP chunk sizes are deliberately smaller. To change them, copy `kiv-scout.toml.example` to `kiv-scout.toml` and adjust:
+MCP defaults are sized for current coding-model context windows. To tune their
+ceilings, copy `kiv-scout.toml.example` to `kiv-scout.toml` and adjust:
 
 ```toml
-mcp_max_tokens = 2000
-mcp_max_files = 20
-max_tokens = 6000
-max_files = 12
+mcp_max_tokens = 32000
+mcp_max_files = 40
+max_tokens = 8000
+max_files = 24
 ```
 
 You can also pass a config explicitly:
@@ -282,7 +296,11 @@ Poor triggers:
 - Questions that already name the exact file and function
 - Long conversations where repeated capsules would add context bloat
 
-Current retrieved chunks are conservative on purpose. If your agent has a larger context window or better pruning, increase `mcp_max_tokens`, `mcp_max_files`, `max_tokens`, or `max_files` in `kiv-scout.toml`, or pass `--max-tokens` and `--max-files` to the CLI.
+Balanced output is intended for routine model orientation. Use deep/full output
+only after the file ranking is plausible; otherwise a larger cap mostly adds
+lexical noise. Repositories can tune `mcp_max_tokens`, `mcp_max_files`,
+`max_tokens`, or `max_files` in `kiv-scout.toml`, and CLI callers can still pass
+explicit overrides.
 
 ## Configuration
 
@@ -380,7 +398,7 @@ capsules therefore remain advisory and opt-in.
 - Ranking is lexical and symbol-aware, not semantic.
 - Exact dependency coverage is intentionally narrower than compiler/package-manager resolution; ambiguous and unsupported observations fail closed.
 - Likely tests are opt-in and incomplete; Kiv does not claim to select every test affected by a change.
-- MCP output is intentionally bounded and may omit useful context until you raise caps.
+- MCP output remains bounded and can still omit context when repository-specific caps are lowered or ranking noise consumes the budget.
 - Calling it too often in a long agent conversation can create context bloat; use clear triggers.
 
 ## License

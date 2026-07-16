@@ -3,14 +3,15 @@
 
 # default_repo = "/path/to/repo"
 # default_capsule = "files"
-# max_tokens = 6000
-# max_files = 12
+# max_tokens = 8000
+# max_files = 24
 # include_tests = false
 # auto_index = false
 
-# MCP defaults are intentionally conservative. Raise these for larger context windows.
-# mcp_max_tokens = 900
-# mcp_max_files = 10
+# MCP ceilings default to 32,000 tokens and 40 files for current coding models.
+# Lower these when the consuming client has a smaller context window.
+# mcp_max_tokens = 32000
+# mcp_max_files = 40
 
 # Architecture policy is explicit and disabled unless enabled here.
 # [architecture]

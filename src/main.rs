@@ -106,9 +106,9 @@ enum Commands {
         diff: Option<String>,
         #[arg(long, default_value_t = 1)]
         depth: usize,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 40)]
         max_files: usize,
-        #[arg(long, default_value_t = 8_000)]
+        #[arg(long, default_value_t = 12_000)]
         max_tokens: usize,
         #[arg(long)]
         include_tests: bool,
@@ -2265,8 +2265,8 @@ fn handle_mcp_request(root: &Path, config: &Config, auto_index: bool, req: McpRe
         "tools/list" => Ok(json!({
             "tools": [
                 {"name": "index_status", "description": "Show terse Kiv Scout index status"},
-                {"name": "get_skeleton", "description": "Return a bounded file skeleton"},
-                {"name": "get_context_capsule", "description": "Rank files for a query; defaults to a bounded file list"},
+                {"name": "get_skeleton", "description": "Return a model-sized file skeleton"},
+                {"name": "get_context_capsule", "description": "Rank files for a query; defaults to compact model context"},
                 {"name": "get_change_impact", "description": "Return bounded exact dependency impact for a query or local git diff"},
                 {"name": "check_architecture_boundaries", "description": "Check explicit repository layer deny rules over exact edges"}
             ]
@@ -2278,6 +2278,14 @@ fn handle_mcp_request(root: &Path, config: &Config, auto_index: bool, req: McpRe
         Ok(value) => json!({"id": id, "result": value}),
         Err(err) => json!({"id": id, "error": {"message": err.to_string()}}),
     }
+}
+
+fn mcp_token_cap(config: &Config) -> usize {
+    config.mcp_max_tokens.unwrap_or(32_000).clamp(64, 32_000)
+}
+
+fn mcp_file_cap(config: &Config) -> usize {
+    config.mcp_max_files.unwrap_or(40).clamp(1, 100)
 }
 
 fn mcp_tool_call(root: &Path, config: &Config, auto_index: bool, params: &Value) -> Result<Value> {
@@ -2306,40 +2314,43 @@ fn mcp_tool_call(root: &Path, config: &Config, auto_index: bool, params: &Value)
             let path = root.join(file);
             let text = fs::read_to_string(&path)?;
             let lang = language_for(file);
-            Ok(
-                json!({"content": truncate_mcp_text(render_skeleton(file, &lang, &text, detail), 4000)}),
-            )
+            let max_chars = mcp_token_cap(config).saturating_mul(4);
+            Ok(json!({
+                "content": truncate_mcp_text(render_skeleton(file, &lang, &text, detail), max_chars)
+            }))
         }
         "get_context_capsule" => {
             let query = args
                 .get("query")
                 .and_then(Value::as_str)
                 .context("missing query")?;
-            let mcp_max_tokens = config.mcp_max_tokens.unwrap_or(900).clamp(1, 32_000);
+            let mcp_max_tokens = mcp_token_cap(config);
             let max_tokens = args
                 .get("max_tokens")
                 .and_then(Value::as_u64)
                 .map(|value| value.clamp(1, mcp_max_tokens as u64) as usize)
-                .unwrap_or_else(|| config.max_tokens.unwrap_or(500).min(mcp_max_tokens));
+                .unwrap_or_else(|| config.max_tokens.unwrap_or(8_000).min(mcp_max_tokens));
             let include_tests = args
                 .get("include_tests")
                 .and_then(Value::as_bool)
                 .unwrap_or_else(|| config.include_tests.unwrap_or(false));
-            let mode = args
-                .get("mode")
-                .and_then(Value::as_str)
-                .map(CapsuleMode::parse)
-                .filter(|mode| *mode != CapsuleMode::Full)
-                .unwrap_or(CapsuleMode::FilesOnly);
-            let mcp_max_files = config.mcp_max_files.unwrap_or(10).clamp(1, 100);
+            let mode = match args.get("mode").and_then(Value::as_str) {
+                Some("full") => CapsuleMode::Full,
+                Some("files-only" | "files_only" | "files") => CapsuleMode::FilesOnly,
+                Some("compact") | None => CapsuleMode::Compact,
+                Some(_) => CapsuleMode::FilesOnly,
+            };
+            let mcp_max_files = mcp_file_cap(config);
             let max_files = args
                 .get("max_files")
                 .and_then(Value::as_u64)
                 .map(|value| value.clamp(1, mcp_max_files as u64) as usize)
-                .unwrap_or_else(|| config.max_files.unwrap_or(6).min(mcp_max_files));
+                .unwrap_or_else(|| config.max_files.unwrap_or(24).min(mcp_max_files));
             let conn = open_db_maybe_auto_index(root, auto_index)?;
             let content = capsule(&conn, query, max_tokens, include_tests, mode, max_files)?;
-            Ok(json!({"content": truncate_mcp_text(content, 4000)}))
+            Ok(json!({
+                "content": truncate_mcp_text(content, max_tokens.saturating_mul(4))
+            }))
         }
         "get_change_impact" => {
             let query = args.get("query").and_then(Value::as_str);
@@ -2352,17 +2363,17 @@ fn mcp_tool_call(root: &Path, config: &Config, auto_index: bool, params: &Value)
                 .and_then(Value::as_u64)
                 .unwrap_or(1)
                 .clamp(1, 3) as usize;
-            let max_files_cap = config.mcp_max_files.unwrap_or(10).clamp(1, 100);
+            let max_files_cap = mcp_file_cap(config);
             let max_files = args
                 .get("max_files")
                 .and_then(Value::as_u64)
-                .unwrap_or(10)
+                .unwrap_or(40)
                 .clamp(1, max_files_cap as u64) as usize;
-            let max_tokens_cap = config.mcp_max_tokens.unwrap_or(900).clamp(64, 32_000);
+            let max_tokens_cap = mcp_token_cap(config);
             let max_tokens = args
                 .get("max_tokens")
                 .and_then(Value::as_u64)
-                .unwrap_or(max_tokens_cap.min(900) as u64)
+                .unwrap_or(max_tokens_cap.min(12_000) as u64)
                 .clamp(64, max_tokens_cap as u64) as usize;
             let include_tests = args
                 .get("include_tests")
@@ -2702,11 +2713,13 @@ mod tests {
 
         let balanced = CapsuleCap::parse("balanced").unwrap();
         assert_eq!(balanced.mode, CapsuleMode::Compact);
-        assert_eq!(balanced.max_tokens, 6000);
+        assert_eq!(balanced.max_tokens, 8000);
+        assert_eq!(balanced.max_files, 24);
 
         let deep = CapsuleCap::parse("deep").unwrap();
         assert_eq!(deep.mode, CapsuleMode::Full);
-        assert_eq!(deep.max_tokens, 16000);
+        assert_eq!(deep.max_tokens, 32000);
+        assert_eq!(deep.max_files, 24);
 
         assert!(CapsuleCap::parse("not-a-cap").is_err());
     }
