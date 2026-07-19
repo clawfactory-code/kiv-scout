@@ -12,7 +12,7 @@ mod capsule;
 pub(crate) mod diff;
 mod impact;
 pub(crate) mod policy;
-pub(crate) use capsule::{CapsuleCap, CapsuleMode, capsule, graph_capsule, render_skeleton};
+pub(crate) use capsule::{CapsuleCap, CapsuleMode, capsule_bundle, graph_capsule, render_skeleton};
 pub(crate) use impact::{
     ImpactOptions, ImpactResult, ImpactRole, impact_from_paths, impact_from_query,
     render_markdown as render_impact_markdown, render_markdown_with_pivot_heading,

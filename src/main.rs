@@ -31,7 +31,7 @@ use scout::policy::{
     ExactDependencyEvidence,
 };
 use scout::{
-    BenchArgs, CapsuleCap, CapsuleMode, ImpactOptions, ImpactResult, ImpactRole, capsule,
+    BenchArgs, CapsuleCap, CapsuleMode, ImpactOptions, ImpactResult, ImpactRole, capsule_bundle,
     graph_capsule, impact_from_paths, impact_from_query, render_impact_markdown,
     render_markdown_with_pivot_heading, render_skeleton,
 };
@@ -89,6 +89,9 @@ enum Commands {
         /// Override the preset file count.
         #[arg(long)]
         max_files: Option<usize>,
+        /// Output format: markdown or json. JSON is pointer-only.
+        #[arg(long, default_value = "markdown")]
+        format: String,
         /// Opt in to exact graph expansion: deps,rdeps,tests.
         #[arg(long, value_delimiter = ',')]
         related: Vec<String>,
@@ -203,6 +206,8 @@ struct IndexedFile {
 #[derive(Debug, Serialize)]
 struct Status {
     repo_root: String,
+    repo_fingerprint: String,
+    index_fingerprint: String,
     indexed_at: String,
     files: i64,
     symbols: i64,
@@ -266,11 +271,14 @@ fn main() -> Result<()> {
             include_tests,
             mode,
             max_files,
+            format,
             related,
             related_depth,
         } => {
+            validate_output_format(&format)?;
             let root = repo_root(config.default_repo.clone())?;
             let conn = open_db_maybe_auto_index(&root, auto_index)?;
+            let status = load_status(&conn, &root)?;
             let cap_name = cap
                 .or_else(|| config.default_capsule.clone())
                 .unwrap_or_else(|| "default".to_string());
@@ -280,10 +288,31 @@ fn main() -> Result<()> {
             let max_files = max_files.or(config.max_files).unwrap_or(cap.max_files);
             let include_tests = include_tests || config.include_tests.unwrap_or(false);
             if related.is_empty() {
-                print!(
-                    "{}",
-                    capsule(&conn, &query, max_tokens, include_tests, mode, max_files)?
-                );
+                let bundle =
+                    capsule_bundle(&conn, &query, max_tokens, include_tests, mode, max_files)?;
+                if format == "json" {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "schema_version": 1,
+                            "query": query,
+                            "mode": mode,
+                            "repo_root": status.repo_root,
+                            "repo_fingerprint": status.repo_fingerprint,
+                            "index_fingerprint": status.index_fingerprint,
+                            "indexed_at": status.indexed_at,
+                            "max_tokens": max_tokens,
+                            "max_files": max_files,
+                            "include_tests": include_tests,
+                            "pointers": bundle.pointers,
+                            "omissions": bundle.omissions,
+                            "estimated_tokens": bundle.estimated_tokens,
+                            "truncated": bundle.truncated,
+                        }))?
+                    );
+                } else {
+                    print!("{}", bundle.content);
+                }
             } else {
                 let directions = parse_related_roles(&related)?;
                 let result = impact_from_query(
@@ -297,10 +326,32 @@ fn main() -> Result<()> {
                         directions,
                     },
                 )?;
-                print!(
-                    "{}",
-                    graph_capsule(&conn, &query, &result, max_tokens, mode)?
-                );
+                if format == "json" {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "schema_version": 1,
+                            "query": query,
+                            "mode": mode,
+                            "source": "kiv_scout_exact_graph",
+                            "confidence": "exact_edges_only",
+                            "repo_root": status.repo_root,
+                            "repo_fingerprint": status.repo_fingerprint,
+                            "index_fingerprint": status.index_fingerprint,
+                            "indexed_at": status.indexed_at,
+                            "files": result.files,
+                            "unresolved": result.unresolved,
+                            "omitted_files": result.omitted_files,
+                            "omitted_observations": result.omitted_observations,
+                            "truncated": result.truncated,
+                        }))?
+                    );
+                } else {
+                    print!(
+                        "{}",
+                        graph_capsule(&conn, &query, &result, max_tokens, mode)?
+                    );
+                }
             }
         }
         Commands::Impact {
@@ -1073,22 +1124,44 @@ fn watcher_pass() -> Result<()> {
         );
         return Ok(());
     }
-    for repo in repos {
+    let mut retained = Vec::new();
+    let mut failures = Vec::new();
+    let mut pruned = 0usize;
+    for repo in &repos {
         if !repo.exists() {
-            eprintln!("Skipping missing watched repo {}", repo.display());
+            eprintln!("Pruning missing watched repo {}", repo.display());
+            pruned += 1;
             continue;
         }
-        let result = watcher_update_repo(&repo)?;
-        if result.rebuilt {
-            eprintln!("Rebuilt {}", repo.display());
-        } else if result.changed() {
-            eprintln!(
-                "Updated {} ({} changed/new, {} removed)",
-                repo.display(),
-                result.upserted,
-                result.deleted
-            );
+        retained.push(repo.clone());
+        match watcher_update_repo(repo) {
+            Ok(result) if result.rebuilt => eprintln!("Rebuilt {}", repo.display()),
+            Ok(result) if result.changed() => {
+                eprintln!(
+                    "Updated {} ({} changed/new, {} removed)",
+                    repo.display(),
+                    result.upserted,
+                    result.deleted
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("Failed to update {}: {error}", repo.display());
+                failures.push((repo.clone(), error.to_string()));
+            }
         }
+    }
+    if pruned > 0 {
+        write_watchlist(&retained)?;
+        eprintln!("Pruned {pruned} missing repositories from the Kiv Scout watchlist");
+    }
+    if let Some((repo, error)) = failures.first() {
+        bail!(
+            "watcher pass failed for {} repositories; first failure: {}: {}",
+            failures.len(),
+            repo.display(),
+            error
+        );
     }
     Ok(())
 }
@@ -1226,7 +1299,20 @@ fn watcher_update_repo(root: &Path) -> Result<IncrementalIndexResult> {
         });
     }
     let mut conn = Connection::open(&path).context("failed to open index database")?;
-    init_schema(&conn)?;
+    if let Err(error) = init_schema(&conn) {
+        if !error
+            .to_string()
+            .contains("Kiv Scout index schema is incompatible")
+        {
+            return Err(error);
+        }
+        drop(conn);
+        index_repo(root)?;
+        return Ok(IncrementalIndexResult {
+            rebuilt: true,
+            ..IncrementalIndexResult::default()
+        });
+    }
     update_index_incremental(&mut conn, root, &path)
 }
 
@@ -2217,6 +2303,8 @@ fn load_status(conn: &Connection, root: &Path) -> Result<Status> {
     };
     Ok(Status {
         repo_root: root.display().to_string(),
+        repo_fingerprint: repository_fingerprint(root),
+        index_fingerprint: index_fingerprint(conn)?,
         indexed_at,
         files,
         symbols,
@@ -2225,6 +2313,28 @@ fn load_status(conn: &Connection, root: &Path) -> Result<Status> {
         ambiguous_imports: graph_counts("ambiguous")?,
         unresolved_imports: graph_counts("unresolved")?,
     })
+}
+
+fn repository_fingerprint(root: &Path) -> String {
+    format!("sha256:{}", hash_text(&root.display().to_string()))
+}
+
+fn index_fingerprint(conn: &Connection) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(INDEX_SCHEMA_VERSION.as_bytes());
+    hasher.update([0]);
+    let mut stmt = conn.prepare("SELECT path, hash FROM files ORDER BY path")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (path, hash) = row?;
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(hash.as_bytes());
+        hasher.update([0]);
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn count_table(conn: &Connection, table: &str) -> Result<i64> {
@@ -2347,9 +2457,17 @@ fn mcp_tool_call(root: &Path, config: &Config, auto_index: bool, params: &Value)
                 .map(|value| value.clamp(1, mcp_max_files as u64) as usize)
                 .unwrap_or_else(|| config.max_files.unwrap_or(24).min(mcp_max_files));
             let conn = open_db_maybe_auto_index(root, auto_index)?;
-            let content = capsule(&conn, query, max_tokens, include_tests, mode, max_files)?;
+            let status = load_status(&conn, root)?;
+            let bundle = capsule_bundle(&conn, query, max_tokens, include_tests, mode, max_files)?;
             Ok(json!({
-                "content": truncate_mcp_text(content, max_tokens.saturating_mul(4))
+                "content": truncate_mcp_text(bundle.content, max_tokens.saturating_mul(4)),
+                "repo_fingerprint": status.repo_fingerprint,
+                "index_fingerprint": status.index_fingerprint,
+                "indexed_at": status.indexed_at,
+                "pointers": bundle.pointers,
+                "omissions": bundle.omissions,
+                "estimated_tokens": bundle.estimated_tokens,
+                "truncated": bundle.truncated,
             }))
         }
         "get_change_impact" => {

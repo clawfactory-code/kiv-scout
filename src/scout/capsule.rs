@@ -4,7 +4,8 @@ use serde::Serialize;
 
 use super::impact::{ImpactResult, ImpactRole};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum CapsuleMode {
     Full,
     Compact,
@@ -108,15 +109,43 @@ pub(crate) fn render_skeleton(path: &str, lang: &str, text: &str, detail: &str) 
     out
 }
 
-pub(crate) fn capsule(
+#[derive(Debug, Serialize)]
+pub(crate) struct CapsulePointer {
+    pub(crate) path: String,
+    pub(crate) language: String,
+    pub(crate) rank: usize,
+    pub(crate) score: f64,
+    pub(crate) source: &'static str,
+    pub(crate) confidence: &'static str,
+    pub(crate) reason: &'static str,
+    pub(crate) estimated_tokens: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CapsuleOmission {
+    pub(crate) reason: &'static str,
+    pub(crate) count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CapsuleBundle {
+    pub(crate) content: String,
+    pub(crate) pointers: Vec<CapsulePointer>,
+    pub(crate) omissions: Vec<CapsuleOmission>,
+    pub(crate) estimated_tokens: usize,
+    pub(crate) truncated: bool,
+}
+
+pub(crate) fn capsule_bundle(
     conn: &Connection,
     query: &str,
     max_tokens: usize,
     include_tests: bool,
     mode: CapsuleMode,
     max_files: usize,
-) -> Result<String> {
+) -> Result<CapsuleBundle> {
     let rows = ranked_files(conn, query, include_tests)?;
+    let ranked_count = rows.len();
     let mut out = String::new();
     out.push_str("# Kiv Scout Context Capsule\n\n");
     out.push_str(&format!("**Query:** {query}\n\n"));
@@ -124,21 +153,60 @@ pub(crate) fn capsule(
     out.push_str("## Pivot Files\n\n");
     if rows.is_empty() {
         out.push_str("*No indexed files matched. Try `kiv-scout index` or a broader query.*\n");
-        return Ok(out);
+        return Ok(CapsuleBundle {
+            estimated_tokens: estimate_tokens(&out),
+            content: out,
+            pointers: Vec::new(),
+            omissions: Vec::new(),
+            truncated: false,
+        });
     }
     let mut used = estimate_tokens(&out);
     let limit = max_files.max(1);
-    for row in rows.into_iter().take(limit) {
+    let mut pointers = Vec::new();
+    let mut token_omissions = 0usize;
+    for (index, row) in rows.into_iter().take(limit).enumerate() {
         let section = row.render(query, mode);
         let section_tokens = estimate_tokens(&section);
         if used + section_tokens > max_tokens && used > 0 {
+            token_omissions = limit.min(ranked_count).saturating_sub(index);
             break;
         }
         used += section_tokens;
         out.push_str(&section);
+        pointers.push(CapsulePointer {
+            path: row.path,
+            language: row.lang,
+            rank: index + 1,
+            score: row.score,
+            source: "kiv_scout_lexical_index",
+            confidence: "advisory",
+            reason: "lexical path, source, or symbol match",
+            estimated_tokens: section_tokens,
+        });
     }
     out.push_str(&format!("\n> Estimated tokens: {used}/{max_tokens}\n"));
-    Ok(out)
+    let file_omissions = ranked_count.saturating_sub(limit);
+    let mut omissions = Vec::new();
+    if token_omissions > 0 {
+        omissions.push(CapsuleOmission {
+            reason: "token_budget",
+            count: token_omissions,
+        });
+    }
+    if file_omissions > 0 {
+        omissions.push(CapsuleOmission {
+            reason: "file_limit",
+            count: file_omissions,
+        });
+    }
+    Ok(CapsuleBundle {
+        content: out,
+        pointers,
+        truncated: !omissions.is_empty(),
+        omissions,
+        estimated_tokens: used,
+    })
 }
 
 pub(crate) fn graph_capsule(
@@ -556,11 +624,29 @@ mod tests {
         assert_eq!(ranked_files_fts(&conn, "needle", true).unwrap().len(), 12);
         assert_eq!(ranked_files_scan(&conn, "needle", true).unwrap().len(), 12);
 
-        let output = capsule(&conn, "needle", 10_000, true, CapsuleMode::FilesOnly, 12).unwrap();
+        let output = capsule_bundle(&conn, "needle", 10_000, true, CapsuleMode::FilesOnly, 12)
+            .unwrap()
+            .content;
         let pivot_count = output
             .lines()
             .filter(|line| line.starts_with("- src/file_"))
             .count();
         assert_eq!(pivot_count, 12);
+    }
+
+    #[test]
+    fn capsule_bundle_exposes_pointer_provenance_and_omissions() {
+        let conn = indexed_matches(12);
+        let bundle =
+            capsule_bundle(&conn, "needle", 10_000, true, CapsuleMode::FilesOnly, 5).unwrap();
+
+        assert_eq!(bundle.pointers.len(), 5);
+        assert_eq!(bundle.pointers[0].rank, 1);
+        assert_eq!(bundle.pointers[0].source, "kiv_scout_lexical_index");
+        assert_eq!(bundle.pointers[0].confidence, "advisory");
+        assert!(bundle.truncated);
+        assert_eq!(bundle.omissions.len(), 1);
+        assert_eq!(bundle.omissions[0].reason, "file_limit");
+        assert_eq!(bundle.omissions[0].count, 7);
     }
 }

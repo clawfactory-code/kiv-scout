@@ -10,6 +10,7 @@ It indexes source files into a local SQLite database, extracts symbols and impor
 
 - Local SQLite index in `.kiv/index.db`
 - Fast ranked capsules using SQLite FTS5 with scan fallback
+- Pointer-only JSON capsules with provenance, budget costs, and freshness fingerprints
 - File skeletons built from imports and symbols
 - Tree-sitter extraction for Rust, TypeScript, JavaScript, and Python
 - Evidence-bearing exact, ambiguous, and unresolved local dependency edges
@@ -113,6 +114,18 @@ cd /path/to/repo
 kiv-scout capsule "where is authentication checked?" --cap files
 ```
 
+For a structured, pointer-only handoff to an agent or context assembler:
+
+```bash
+kiv-scout capsule "where is authentication checked?" --cap files --format json
+```
+
+The JSON form never includes source excerpts. It returns ranked paths with
+language, score, rank, provenance, advisory confidence, reason, estimated token
+cost, and explicit token/file-limit omissions. Top-level repository and index
+fingerprints let a caller reject pointers captured from a different checkout
+or stale indexed source state.
+
 Then ask for compact context when the file list looks plausible:
 
 ```bash
@@ -170,7 +183,14 @@ kiv-scout bench --repo /path/to/repo
 kiv-scout watcher start
 ```
 
-The watcher uses the external Unix `watch` command to run one incremental update pass on an interval. Each pass applies the same incremental updater used by `--auto-index`: new files are added, changed files are refreshed, and removed files are deleted from the DB. It writes updates to each repo's existing `.kiv/index.db`.
+The watcher uses the external Unix `watch` command to run one incremental
+update pass on an interval. Each pass applies the same incremental updater used
+by `--auto-index`: new files are added, changed files are refreshed, and removed
+files are deleted from the DB. It writes updates to each repo's existing
+`.kiv/index.db`, prunes watchlist entries whose checkouts no longer exist, and
+rebuilds generated indexes created by an incompatible older schema. A failure
+in one existing repository is reported after the watcher still attempts the
+remaining repositories.
 
 On Linux, `watch` is usually available through `procps` or `procps-ng`. On macOS, `watch` is not installed by default. If it is missing, `kiv-scout watcher start` explains the install command and, in an interactive terminal, asks before attempting to install it.
 
@@ -235,6 +255,11 @@ default, `get_context_capsule` returns compact context for up to 24 files and
 8,000 estimated tokens. Clients may request full mode up to the MCP cap (40
 files and 32,000 tokens by default). Repository configuration can lower or
 raise those ceilings within Kiv's hard safety bounds.
+
+Every `get_context_capsule` response also includes the same pointer manifest as
+CLI JSON: `pointers`, `omissions`, `repo_fingerprint`, `index_fingerprint`,
+`indexed_at`, `estimated_tokens`, and `truncated`. The Markdown `content` field
+remains for compatibility.
 
 `get_change_impact` accepts exactly one of `query` or `diff`, clamps graph depth
 to three, and returns bounded Markdown plus structured file roles and evidence.
@@ -313,6 +338,18 @@ Set `auto_index = true` to make `status`, `capsule`, and MCP context calls build
 Generated indexes carry a schema version. A normal `kiv-scout index` rebuilds
 an incompatible generated database; auto-index and watcher paths instead give
 an actionable rebuild error rather than guessing at a migration.
+
+## Pointer Freshness Contract
+
+`repo_fingerprint` identifies the canonical local checkout path without
+exposing that path inside each pointer. `index_fingerprint` hashes the schema
+version plus every sorted indexed path and source hash. It changes when indexed
+source state changes but not merely because an index is refreshed at a new
+timestamp.
+
+Fingerprints are freshness evidence, not a claim that ranking is semantically
+correct. Capsule scores are relative lexical ranking signals and
+`confidence: "advisory"` is intentionally not a fabricated probability.
 
 ## Dependency Resolution Contract
 

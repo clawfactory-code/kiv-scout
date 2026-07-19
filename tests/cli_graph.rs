@@ -1,3 +1,4 @@
+use rusqlite::Connection;
 use serde_json::Value;
 use std::fs;
 use std::io::Write;
@@ -36,6 +37,7 @@ fn run(root: &Path, args: &[&str]) -> Output {
     Command::new(binary())
         .args(args)
         .current_dir(root)
+        .env("KIV_SCOUT_HOME", root.join(".kiv-scout-state"))
         .output()
         .unwrap()
 }
@@ -48,6 +50,7 @@ fn mcp_call(root: &Path, request: Value) -> Value {
     let mut child = Command::new(binary())
         .args(["mcp", root.to_str().unwrap()])
         .current_dir(root)
+        .env("KIV_SCOUT_HOME", root.join(".kiv-scout-state"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -188,6 +191,23 @@ fn mcp_defaults_return_model_sized_context_and_complete_skeletons() {
             }
         }),
     );
+    assert!(
+        compact["result"]["repo_fingerprint"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert!(
+        compact["result"]["index_fingerprint"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(compact["result"]["pointers"].as_array().unwrap().len(), 24);
+    assert_eq!(
+        compact["result"]["pointers"][0]["source"],
+        "kiv_scout_lexical_index"
+    );
     let compact = compact["result"]["content"].as_str().unwrap();
     assert!(compact.contains("**Mode:** compact"));
     assert_eq!(
@@ -235,6 +255,112 @@ fn mcp_defaults_return_model_sized_context_and_complete_skeletons() {
     let skeleton = skeleton["result"]["content"].as_str().unwrap();
     assert!(skeleton.contains("function_149"));
     assert!(!skeleton.contains("truncated by Kiv Scout MCP cap"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn json_capsules_are_pointer_only_and_fingerprinted() {
+    let root = temporary_repo("pointer-contract");
+    assert!(
+        run(&root, &["index", root.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let before_status: Value =
+        serde_json::from_slice(&run(&root, &["status", "."]).stdout).unwrap();
+    let capsule = run(
+        &root,
+        &[
+            "capsule",
+            "createOrder domain order",
+            "--cap",
+            "files",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(capsule.status.success(), "{}", stdout(&capsule));
+    let capsule: Value = serde_json::from_slice(&capsule.stdout).unwrap();
+    assert_eq!(capsule["schema_version"], 1);
+    assert_eq!(
+        capsule["repo_fingerprint"],
+        before_status["repo_fingerprint"]
+    );
+    assert_eq!(
+        capsule["index_fingerprint"],
+        before_status["index_fingerprint"]
+    );
+    assert_eq!(capsule["pointers"][0]["path"], "src/domain/order.ts");
+    assert_eq!(capsule["pointers"][0]["confidence"], "advisory");
+    assert_eq!(
+        capsule["pointers"][0]["reason"],
+        "lexical path, source, or symbol match"
+    );
+    let serialized = serde_json::to_string(&capsule).unwrap();
+    assert!(!serialized.contains("return db"));
+
+    fs::write(
+        root.join("src/domain/order.ts"),
+        "import { db } from '../infra/db';\nexport function createOrder() { return db + 1; }\n",
+    )
+    .unwrap();
+    let after_status = run(&root, &["--auto-index", "status", "."]);
+    assert!(after_status.status.success());
+    let after_status: Value = serde_json::from_slice(&after_status.stdout).unwrap();
+    assert_eq!(
+        before_status["repo_fingerprint"],
+        after_status["repo_fingerprint"]
+    );
+    assert_ne!(
+        before_status["index_fingerprint"],
+        after_status["index_fingerprint"]
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn watcher_prunes_missing_repos_and_rebuilds_legacy_indexes() {
+    let root = temporary_repo("watcher-recovery");
+    assert!(
+        run(&root, &["index", root.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let watchlist = root.join(".kiv-scout-state/watchlist");
+    let missing = root.join("removed-worktree");
+    let mut entries = fs::read_to_string(&watchlist).unwrap();
+    entries.push_str(&format!("{}\n", missing.display()));
+    fs::write(&watchlist, entries).unwrap();
+
+    let conn = Connection::open(root.join(".kiv/index.db")).unwrap();
+    conn.execute(
+        "UPDATE metadata SET value = '1' WHERE key = 'schema_version'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let pass = run(&root, &["watcher", "start", "--once"]);
+    assert!(
+        pass.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pass.stderr)
+    );
+    let stderr = String::from_utf8(pass.stderr).unwrap();
+    assert!(stderr.contains("Pruning missing watched repo"));
+    assert!(stderr.contains("Rebuilt"));
+    assert!(
+        !fs::read_to_string(&watchlist)
+            .unwrap()
+            .contains("removed-worktree")
+    );
+
+    let status = run(&root, &["status", "."]);
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["files"], 3);
 
     fs::remove_dir_all(root).unwrap();
 }
