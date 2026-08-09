@@ -192,6 +192,13 @@ rebuilds generated indexes created by an incompatible older schema. A failure
 in one existing repository is reported after the watcher still attempts the
 remaining repositories.
 
+Source discovery honors `.gitignore`, `.git/info/exclude`, global Git ignore
+rules, and `.ignore`, so generated or private run directories do not enter the
+index merely because they live under a repository. Incremental FTS updates use
+stable SQLite row IDs instead of scanning the full text index by path. Large
+change sets are rebuilt through a fresh database and promoted only after the
+rebuild succeeds, which bounds write-ahead-log and transaction growth.
+
 On Linux, `watch` is usually available through `procps` or `procps-ng`. On macOS, `watch` is not installed by default. If it is missing, `kiv-scout watcher start` explains the install command and, in an interactive terminal, asks before attempting to install it.
 
 Useful watcher commands:

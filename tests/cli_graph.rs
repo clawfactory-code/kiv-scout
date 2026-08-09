@@ -364,3 +364,79 @@ fn watcher_prunes_missing_repos_and_rebuilds_legacy_indexes() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn indexing_respects_ignore_files_without_hiding_normal_hidden_source() {
+    let root = temporary_repo("ignore-rules");
+    fs::write(root.join(".gitignore"), "runs/\n.effectco-snapshots/\n").unwrap();
+    fs::create_dir_all(root.join("runs/trial/worktree/src")).unwrap();
+    fs::create_dir_all(root.join(".effectco-snapshots/snapshot/src")).unwrap();
+    fs::create_dir_all(root.join(".github/workflows")).unwrap();
+    for index in 0..1_000 {
+        fs::write(
+            root.join(format!("runs/trial/worktree/src/generated_{index:04}.ts")),
+            "export const generated = true;\n",
+        )
+        .unwrap();
+    }
+    fs::write(
+        root.join(".effectco-snapshots/snapshot/src/copied.ts"),
+        "export const copied = true;\n",
+    )
+    .unwrap();
+    fs::write(root.join(".github/workflows/check.yml"), "name: check\n").unwrap();
+
+    let indexed = run(&root, &["index", root.to_str().unwrap()]);
+    assert!(indexed.status.success(), "{}", stdout(&indexed));
+    let status: Value = serde_json::from_slice(&run(&root, &["status", "."]).stdout).unwrap();
+    assert_eq!(status["files"], 4);
+
+    let conn = Connection::open(root.join(".kiv/index.db")).unwrap();
+    let ignored: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE path LIKE 'runs/%' OR path LIKE '.effectco-snapshots/%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ignored, 0);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn large_incremental_deletes_rebuild_cleanly_and_fts_rowids_stay_aligned() {
+    let root = temporary_repo("bounded-rebuild");
+    fs::create_dir_all(root.join("bulk")).unwrap();
+    for index in 0..300 {
+        fs::write(
+            root.join(format!("bulk/file_{index:03}.ts")),
+            format!("export const value_{index} = {index};\n"),
+        )
+        .unwrap();
+    }
+    assert!(
+        run(&root, &["index", root.to_str().unwrap()])
+            .status
+            .success()
+    );
+    fs::remove_dir_all(root.join("bulk")).unwrap();
+
+    let refreshed = run(&root, &["--auto-index", "status", "."]);
+    assert!(refreshed.status.success(), "{}", stdout(&refreshed));
+    let status: Value = serde_json::from_slice(&refreshed.stdout).unwrap();
+    assert_eq!(status["files"], 3);
+    assert!(!root.join(".kiv/index.db-wal").exists());
+
+    let conn = Connection::open(root.join(".kiv/index.db")).unwrap();
+    let aligned: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM files JOIN file_fts ON file_fts.rowid = files.rowid AND file_fts.path = files.path",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(aligned, 3);
+
+    fs::remove_dir_all(root).unwrap();
+}
