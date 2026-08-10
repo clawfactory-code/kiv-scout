@@ -1,8 +1,9 @@
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
+use ignore::WalkBuilder;
 use regex::Regex;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -31,12 +32,14 @@ use scout::policy::{
     ExactDependencyEvidence,
 };
 use scout::{
-    BenchArgs, CapsuleCap, CapsuleMode, ImpactOptions, ImpactResult, ImpactRole, capsule,
+    BenchArgs, CapsuleCap, CapsuleMode, ImpactOptions, ImpactResult, ImpactRole, capsule_bundle,
     graph_capsule, impact_from_paths, impact_from_query, render_impact_markdown,
     render_markdown_with_pivot_heading, render_skeleton,
 };
 
-const INDEX_SCHEMA_VERSION: &str = "3";
+const INDEX_SCHEMA_VERSION: &str = "4";
+const MAX_INCREMENTAL_MUTATIONS: usize = 256;
+const MAX_INCREMENTAL_CONTENT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Parser)]
 #[command(name = "kiv-scout")]
@@ -89,6 +92,9 @@ enum Commands {
         /// Override the preset file count.
         #[arg(long)]
         max_files: Option<usize>,
+        /// Output format: markdown or json. JSON is pointer-only.
+        #[arg(long, default_value = "markdown")]
+        format: String,
         /// Opt in to exact graph expansion: deps,rdeps,tests.
         #[arg(long, value_delimiter = ',')]
         related: Vec<String>,
@@ -203,6 +209,8 @@ struct IndexedFile {
 #[derive(Debug, Serialize)]
 struct Status {
     repo_root: String,
+    repo_fingerprint: String,
+    index_fingerprint: String,
     indexed_at: String,
     files: i64,
     symbols: i64,
@@ -266,11 +274,14 @@ fn main() -> Result<()> {
             include_tests,
             mode,
             max_files,
+            format,
             related,
             related_depth,
         } => {
+            validate_output_format(&format)?;
             let root = repo_root(config.default_repo.clone())?;
             let conn = open_db_maybe_auto_index(&root, auto_index)?;
+            let status = load_status(&conn, &root)?;
             let cap_name = cap
                 .or_else(|| config.default_capsule.clone())
                 .unwrap_or_else(|| "default".to_string());
@@ -280,10 +291,31 @@ fn main() -> Result<()> {
             let max_files = max_files.or(config.max_files).unwrap_or(cap.max_files);
             let include_tests = include_tests || config.include_tests.unwrap_or(false);
             if related.is_empty() {
-                print!(
-                    "{}",
-                    capsule(&conn, &query, max_tokens, include_tests, mode, max_files)?
-                );
+                let bundle =
+                    capsule_bundle(&conn, &query, max_tokens, include_tests, mode, max_files)?;
+                if format == "json" {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "schema_version": 1,
+                            "query": query,
+                            "mode": mode,
+                            "repo_root": status.repo_root,
+                            "repo_fingerprint": status.repo_fingerprint,
+                            "index_fingerprint": status.index_fingerprint,
+                            "indexed_at": status.indexed_at,
+                            "max_tokens": max_tokens,
+                            "max_files": max_files,
+                            "include_tests": include_tests,
+                            "pointers": bundle.pointers,
+                            "omissions": bundle.omissions,
+                            "estimated_tokens": bundle.estimated_tokens,
+                            "truncated": bundle.truncated,
+                        }))?
+                    );
+                } else {
+                    print!("{}", bundle.content);
+                }
             } else {
                 let directions = parse_related_roles(&related)?;
                 let result = impact_from_query(
@@ -297,10 +329,32 @@ fn main() -> Result<()> {
                         directions,
                     },
                 )?;
-                print!(
-                    "{}",
-                    graph_capsule(&conn, &query, &result, max_tokens, mode)?
-                );
+                if format == "json" {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "schema_version": 1,
+                            "query": query,
+                            "mode": mode,
+                            "source": "kiv_scout_exact_graph",
+                            "confidence": "exact_edges_only",
+                            "repo_root": status.repo_root,
+                            "repo_fingerprint": status.repo_fingerprint,
+                            "index_fingerprint": status.index_fingerprint,
+                            "indexed_at": status.indexed_at,
+                            "files": result.files,
+                            "unresolved": result.unresolved,
+                            "omitted_files": result.omitted_files,
+                            "omitted_observations": result.omitted_observations,
+                            "truncated": result.truncated,
+                        }))?
+                    );
+                } else {
+                    print!(
+                        "{}",
+                        graph_capsule(&conn, &query, &result, max_tokens, mode)?
+                    );
+                }
             }
         }
         Commands::Impact {
@@ -856,18 +910,30 @@ fn db_path(root: &Path) -> PathBuf {
     root.join(".kiv").join("index.db")
 }
 
-fn remove_index_files(root: &Path) -> Result<usize> {
-    let kiv_dir = root.join(".kiv");
-    let names = ["index.db", "index.db-wal", "index.db-shm"];
+fn database_paths(path: &Path) -> [PathBuf; 3] {
+    let display = path.to_string_lossy();
+    [
+        path.to_path_buf(),
+        PathBuf::from(format!("{display}-wal")),
+        PathBuf::from(format!("{display}-shm")),
+    ]
+}
+
+fn remove_database_files(path: &Path) -> Result<usize> {
     let mut removed = 0;
-    for name in names {
-        let path = kiv_dir.join(name);
+    for path in database_paths(path) {
         if path.exists() {
             fs::remove_file(&path)
                 .with_context(|| format!("failed to remove {}", path.display()))?;
             removed += 1;
         }
     }
+    Ok(removed)
+}
+
+fn remove_index_files(root: &Path) -> Result<usize> {
+    let kiv_dir = root.join(".kiv");
+    let removed = remove_database_files(&db_path(root))?;
     if kiv_dir.exists() && fs::read_dir(&kiv_dir)?.next().is_none() {
         fs::remove_dir(&kiv_dir)
             .with_context(|| format!("failed to remove {}", kiv_dir.display()))?;
@@ -904,8 +970,24 @@ fn auto_index_if_needed(root: &Path) -> Result<()> {
     }
 
     let mut conn = Connection::open(&path).context("failed to open index database")?;
-    init_schema(&conn)?;
-    let result = update_index_incremental(&mut conn, root, &path)?;
+    if let Err(error) = init_schema(&conn) {
+        if !error
+            .to_string()
+            .contains("Kiv Scout index schema is incompatible")
+        {
+            return Err(error);
+        }
+        drop(conn);
+        index_repo(root)?;
+        return Ok(());
+    }
+    let mut result = update_index_incremental(&mut conn, root)?;
+    if result.rebuild_required {
+        drop(conn);
+        index_repo(root)?;
+        result.rebuilt = true;
+        result.rebuild_required = false;
+    }
     if result.changed() && io::stderr().is_terminal() {
         eprintln!(
             "Auto-index updated {} ({} changed/new, {} removed)",
@@ -923,6 +1005,7 @@ struct IncrementalIndexResult {
     deleted: usize,
     touched_unchanged: usize,
     rebuilt: bool,
+    rebuild_required: bool,
 }
 
 impl IncrementalIndexResult {
@@ -935,12 +1018,8 @@ impl IncrementalIndexResult {
     }
 }
 
-fn update_index_incremental(
-    conn: &mut Connection,
-    root: &Path,
-    index_path: &Path,
-) -> Result<IncrementalIndexResult> {
-    let index_modified = modified_time(index_path)?;
+fn update_index_incremental(conn: &mut Connection, root: &Path) -> Result<IncrementalIndexResult> {
+    let indexed_at = indexed_at_time(conn)?;
     let sources = collect_source_paths(root)?;
     let existing = indexed_file_hashes(conn)?;
     let current_paths = sources
@@ -959,7 +1038,7 @@ fn update_index_incremental(
         let known_hash = existing.get(&source.path);
         let should_check = known_hash.is_none()
             || modified_time(&source.abs)
-                .map(|modified| modified > index_modified)
+                .map(|modified| modified > indexed_at)
                 .unwrap_or(false);
         if !should_check {
             continue;
@@ -990,8 +1069,17 @@ fn update_index_incremental(
         deleted: deleted.len(),
         touched_unchanged,
         rebuilt: false,
+        rebuild_required: false,
     };
-    if result.observed_newer_sources() {
+    let mutation_count = result.upserted + result.deleted;
+    let mutation_bytes = upserts.iter().map(|file| file.text.len()).sum::<usize>();
+    let rebuild_required = mutation_count > MAX_INCREMENTAL_MUTATIONS
+        || mutation_bytes > MAX_INCREMENTAL_CONTENT_BYTES;
+    let result = IncrementalIndexResult {
+        rebuild_required,
+        ..result
+    };
+    if result.observed_newer_sources() && !result.rebuild_required {
         write_index_delta(conn, root, &upserts, &deleted)?;
     }
     Ok(result)
@@ -1014,6 +1102,18 @@ fn modified_time(path: &Path) -> Result<SystemTime> {
     fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .with_context(|| format!("failed to read modified time for {}", path.display()))
+}
+
+fn indexed_at_time(conn: &Connection) -> Result<SystemTime> {
+    let value = conn.query_row(
+        "SELECT value FROM metadata WHERE key = 'indexed_at'",
+        [],
+        |row| row.get::<_, String>(0),
+    )?;
+    let indexed_at = DateTime::parse_from_rfc3339(&value)
+        .with_context(|| format!("invalid indexed_at metadata value {value}"))?
+        .with_timezone(&Utc);
+    Ok(SystemTime::from(indexed_at))
 }
 
 fn handle_watcher_command(command: WatcherCommands) -> Result<()> {
@@ -1073,22 +1173,47 @@ fn watcher_pass() -> Result<()> {
         );
         return Ok(());
     }
+    let mut retained = Vec::new();
+    let mut pruned = 0usize;
     for repo in repos {
         if !repo.exists() {
-            eprintln!("Skipping missing watched repo {}", repo.display());
+            eprintln!("Pruning missing watched repo {}", repo.display());
+            pruned += 1;
             continue;
         }
-        let result = watcher_update_repo(&repo)?;
-        if result.rebuilt {
-            eprintln!("Rebuilt {}", repo.display());
-        } else if result.changed() {
-            eprintln!(
-                "Updated {} ({} changed/new, {} removed)",
-                repo.display(),
-                result.upserted,
-                result.deleted
-            );
+        retained.push(repo);
+    }
+    if pruned > 0 {
+        write_watchlist(&retained)?;
+        eprintln!("Pruned {pruned} missing repositories from the Kiv Scout watchlist");
+    }
+
+    let mut failures = Vec::new();
+    for repo in &retained {
+        match watcher_update_repo(repo) {
+            Ok(result) if result.rebuilt => eprintln!("Rebuilt {}", repo.display()),
+            Ok(result) if result.changed() => {
+                eprintln!(
+                    "Updated {} ({} changed/new, {} removed)",
+                    repo.display(),
+                    result.upserted,
+                    result.deleted
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("Failed to update {}: {error}", repo.display());
+                failures.push((repo.clone(), error.to_string()));
+            }
         }
+    }
+    if let Some((repo, error)) = failures.first() {
+        bail!(
+            "watcher pass failed for {} repositories; first failure: {}: {}",
+            failures.len(),
+            repo.display(),
+            error
+        );
     }
     Ok(())
 }
@@ -1226,8 +1351,33 @@ fn watcher_update_repo(root: &Path) -> Result<IncrementalIndexResult> {
         });
     }
     let mut conn = Connection::open(&path).context("failed to open index database")?;
-    init_schema(&conn)?;
-    update_index_incremental(&mut conn, root, &path)
+    if let Err(error) = init_schema(&conn) {
+        if !error
+            .to_string()
+            .contains("Kiv Scout index schema is incompatible")
+        {
+            return Err(error);
+        }
+        drop(conn);
+        index_repo(root)?;
+        return Ok(IncrementalIndexResult {
+            rebuilt: true,
+            ..IncrementalIndexResult::default()
+        });
+    }
+    let result = update_index_incremental(&mut conn, root)?;
+    if result.rebuild_required {
+        drop(conn);
+        index_repo(root)?;
+        return Ok(IncrementalIndexResult {
+            upserted: result.upserted,
+            deleted: result.deleted,
+            touched_unchanged: result.touched_unchanged,
+            rebuilt: true,
+            rebuild_required: false,
+        });
+    }
+    Ok(result)
 }
 
 fn add_watch_repo(root: &Path) -> Result<()> {
@@ -1300,8 +1450,6 @@ fn watchlist_path() -> Result<PathBuf> {
 fn index_repo(root: &Path) -> Result<Status> {
     let mut progress = IndexProgress::new(root);
     fs::create_dir_all(root.join(".kiv"))?;
-    let mut conn = Connection::open(db_path(root))?;
-    init_schema_for_rebuild(&conn)?;
     progress.phase("Discovering source files");
     let files = collect_source_paths(root)?;
     progress.set_total(files.len());
@@ -1328,8 +1476,34 @@ fn index_repo(root: &Path) -> Result<Status> {
         progress.tick();
     }
     progress.phase("Writing index database");
-    write_index(&mut conn, root, &indexed)?;
-    let status = load_status(&conn, root)?;
+    let target_path = db_path(root);
+    let temp_path = target_path.with_file_name(format!("index.db.rebuild-{}", std::process::id()));
+    remove_database_files(&temp_path)?;
+    let build_result = (|| -> Result<Status> {
+        let mut conn = Connection::open(&temp_path)?;
+        create_schema(&conn)?;
+        write_index(&mut conn, root, &indexed)?;
+        let status = load_status(&conn, root)?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")?;
+        drop(conn);
+        Ok(status)
+    })();
+    let status = match build_result {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = remove_database_files(&temp_path);
+            return Err(error);
+        }
+    };
+    remove_database_files(&target_path)?;
+    fs::rename(&temp_path, &target_path).with_context(|| {
+        format!(
+            "failed to replace index {} with {}",
+            target_path.display(),
+            temp_path.display()
+        )
+    })?;
+    remove_database_files(&temp_path)?;
     progress.finish(&status);
     Ok(status)
 }
@@ -1360,6 +1534,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
     create_schema(conn)
 }
 
+#[cfg(test)]
 fn init_schema_for_rebuild(conn: &Connection) -> Result<()> {
     if init_schema(conn).is_err() {
         conn.execute_batch(
@@ -1405,6 +1580,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
             kind TEXT NOT NULL,
             line INTEGER NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS symbols_file_path_idx
+            ON symbols(file_path);
+        CREATE INDEX IF NOT EXISTS imports_file_path_idx
+            ON imports(file_path);
         CREATE TABLE IF NOT EXISTS dependency_edges (
             id INTEGER PRIMARY KEY,
             source_path TEXT NOT NULL,
@@ -1492,10 +1671,19 @@ fn write_metadata(tx: &rusqlite::Transaction<'_>, root: &Path) -> Result<()> {
 }
 
 fn delete_indexed_file(tx: &rusqlite::Transaction<'_>, path: &str) -> Result<()> {
+    let rowid = tx
+        .query_row(
+            "SELECT rowid FROM files WHERE path = ?1",
+            params![path],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    if let Some(rowid) = rowid {
+        tx.execute("DELETE FROM file_fts WHERE rowid = ?1", params![rowid])?;
+    }
     tx.execute("DELETE FROM files WHERE path = ?1", params![path])?;
     tx.execute("DELETE FROM symbols WHERE file_path = ?1", params![path])?;
     tx.execute("DELETE FROM imports WHERE file_path = ?1", params![path])?;
-    tx.execute("DELETE FROM file_fts WHERE path = ?1", params![path])?;
     Ok(())
 }
 
@@ -1504,6 +1692,7 @@ fn insert_indexed_file(tx: &rusqlite::Transaction<'_>, file: &IndexedFile) -> Re
         "INSERT INTO files(path, lang, hash, content) VALUES (?1, ?2, ?3, ?4)",
         params![file.path, file.lang, file.hash, file.text],
     )?;
+    let rowid = tx.last_insert_rowid();
     let symbol_text = file
         .symbols
         .iter()
@@ -1511,8 +1700,8 @@ fn insert_indexed_file(tx: &rusqlite::Transaction<'_>, file: &IndexedFile) -> Re
         .collect::<Vec<_>>()
         .join("\n");
     tx.execute(
-        "INSERT INTO file_fts(path, content, symbols) VALUES (?1, ?2, ?3)",
-        params![file.path, file.text, symbol_text],
+        "INSERT INTO file_fts(rowid, path, content, symbols) VALUES (?1, ?2, ?3, ?4)",
+        params![rowid, file.path, file.text, symbol_text],
     )?;
     for symbol in &file.symbols {
         tx.execute(
@@ -1545,9 +1734,34 @@ fn insert_indexed_file(tx: &rusqlite::Transaction<'_>, file: &IndexedFile) -> Re
 
 fn collect_source_paths(root: &Path) -> Result<Vec<SourcePath>> {
     let mut files = Vec::new();
-    for entry in WalkDir::new(root).follow_links(false) {
+    let filter_root = root.to_path_buf();
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .follow_links(false)
+        .hidden(false)
+        .ignore(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .parents(true)
+        .require_git(false)
+        .filter_entry(move |entry| {
+            if entry.path() == filter_root {
+                return true;
+            }
+            entry
+                .path()
+                .strip_prefix(&filter_root)
+                .ok()
+                .map(|path| !should_skip(&path.to_string_lossy().replace('\\', "/")))
+                .unwrap_or(true)
+        });
+    for entry in builder.build() {
         let entry = entry?;
-        if !entry.file_type().is_file() {
+        if !entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_file())
+        {
             continue;
         }
         let abs = entry.path().to_path_buf();
@@ -2217,6 +2431,8 @@ fn load_status(conn: &Connection, root: &Path) -> Result<Status> {
     };
     Ok(Status {
         repo_root: root.display().to_string(),
+        repo_fingerprint: repository_fingerprint(root),
+        index_fingerprint: index_fingerprint(conn)?,
         indexed_at,
         files,
         symbols,
@@ -2225,6 +2441,28 @@ fn load_status(conn: &Connection, root: &Path) -> Result<Status> {
         ambiguous_imports: graph_counts("ambiguous")?,
         unresolved_imports: graph_counts("unresolved")?,
     })
+}
+
+fn repository_fingerprint(root: &Path) -> String {
+    format!("sha256:{}", hash_text(&root.display().to_string()))
+}
+
+fn index_fingerprint(conn: &Connection) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(INDEX_SCHEMA_VERSION.as_bytes());
+    hasher.update([0]);
+    let mut stmt = conn.prepare("SELECT path, hash FROM files ORDER BY path")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (path, hash) = row?;
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(hash.as_bytes());
+        hasher.update([0]);
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn count_table(conn: &Connection, table: &str) -> Result<i64> {
@@ -2347,9 +2585,17 @@ fn mcp_tool_call(root: &Path, config: &Config, auto_index: bool, params: &Value)
                 .map(|value| value.clamp(1, mcp_max_files as u64) as usize)
                 .unwrap_or_else(|| config.max_files.unwrap_or(24).min(mcp_max_files));
             let conn = open_db_maybe_auto_index(root, auto_index)?;
-            let content = capsule(&conn, query, max_tokens, include_tests, mode, max_files)?;
+            let status = load_status(&conn, root)?;
+            let bundle = capsule_bundle(&conn, query, max_tokens, include_tests, mode, max_files)?;
             Ok(json!({
-                "content": truncate_mcp_text(content, max_tokens.saturating_mul(4))
+                "content": truncate_mcp_text(bundle.content, max_tokens.saturating_mul(4)),
+                "repo_fingerprint": status.repo_fingerprint,
+                "index_fingerprint": status.index_fingerprint,
+                "indexed_at": status.indexed_at,
+                "pointers": bundle.pointers,
+                "omissions": bundle.omissions,
+                "estimated_tokens": bundle.estimated_tokens,
+                "truncated": bundle.truncated,
             }))
         }
         "get_change_impact" => {
@@ -2675,6 +2921,34 @@ mod tests {
         write_index(&mut first, Path::new("/repo"), &files).unwrap();
         write_index(&mut second, Path::new("/repo"), &reversed).unwrap();
         assert_eq!(semantic_edges(&first), semantic_edges(&second));
+    }
+
+    #[test]
+    fn deleting_one_file_keeps_files_and_fts_rowids_aligned() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let files = vec![
+            indexed_file("src/first.ts", "typescript", Vec::new()),
+            indexed_file("src/second.ts", "typescript", Vec::new()),
+        ];
+        write_index(&mut conn, Path::new("/repo"), &files).unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        delete_indexed_file(&tx, "src/first.ts").unwrap();
+        tx.commit().unwrap();
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM file_fts", [], |row| row.get(0))
+            .unwrap();
+        let aligned: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files JOIN file_fts ON file_fts.rowid = files.rowid AND file_fts.path = files.path",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 1);
+        assert_eq!(aligned, 1);
     }
 
     #[test]

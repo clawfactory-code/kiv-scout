@@ -56,6 +56,7 @@ fn command(root: &Path, args: &[&str]) -> Output {
     Command::new(binary())
         .args(args)
         .current_dir(root)
+        .env("KIV_SCOUT_HOME", root.join(".kiv-scout-state"))
         .output()
         .unwrap()
 }
